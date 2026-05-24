@@ -19,7 +19,7 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const isInitiatorRef = useRef(false);
 
-  // Request local camera and microphone stream
+  // 1. Request local camera and microphone stream
   useEffect(() => {
     let active = true;
 
@@ -51,13 +51,11 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
     };
   }, []);
 
-  // Set up the simple-peer WebRTC connection once the channel and local stream are ready,
-  // and we have two players in the room.
+  // 2. Set up the simple-peer WebRTC connection once channel and local stream are ready
   useEffect(() => {
     if (!channel || !localStream || players.length < 2) {
-      // Clean up previous peer if the room state becomes invalid
       if (peerRef.current) {
-        peerRef.current.destroy();
+        try { (peerRef.current as any).destroy(); } catch (e) {}
         peerRef.current = null;
         setIsWebRTCConnected(false);
         setRemoteStream(null);
@@ -65,29 +63,28 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
       return;
     }
 
-    // Determine opponent name
     const opponent = players.find((p) => p !== myName);
     if (!opponent) return;
 
-    // The alphabetically-first player is the initiator
     const sorted = [...players].sort();
     const isInitiator = sorted[0] === myName;
     isInitiatorRef.current = isInitiator;
 
-    let peerDestroyed = false;
+    let active = true; // Stale listener block karne ka flag
 
     async function setupPeer() {
       try {
         console.log(`Setting up simple-peer: initiator=${isInitiator}, me=${myName}, opponent=${opponent}`);
         const peer = await createPeer(isInitiator, localStream!);
-        if (peerDestroyed) {
+        
+        if (!active) {
           peer.destroy();
           return;
         }
         peerRef.current = peer;
 
-        // When the peer has a signal to send, broadcast it via Supabase Realtime channel
         peer.on('signal', (signal) => {
+          if (!active) return;
           channel.send({
             type: 'broadcast',
             event: 'webrtc-signal',
@@ -95,30 +92,34 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
           });
         });
 
-        // When remote stream is received
         peer.on('stream', (stream) => {
+          if (!active) return;
           console.log('Received remote WebRTC stream!');
           setRemoteStream(stream);
           setIsWebRTCConnected(true);
         });
 
         peer.on('connect', () => {
+          if (!active) return;
           console.log('WebRTC connection established!');
           setIsWebRTCConnected(true);
         });
 
         peer.on('close', () => {
+          if (!active) return;
           console.log('WebRTC connection closed.');
           setIsWebRTCConnected(false);
           setRemoteStream(null);
         });
 
         peer.on('error', (err) => {
+          if (!active) return;
           console.error('WebRTC simple-peer error:', err);
           setIsWebRTCConnected(false);
           setRemoteStream(null);
         });
       } catch (err: any) {
+        if (!active) return;
         console.error('Error creating simple-peer:', err);
         setError('Failed to establish WebRTC peer connection');
       }
@@ -126,11 +127,19 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
 
     setupPeer();
 
-    // Listen to signaling messages
+    // 3. Listen to signaling messages
     const channelSub = channel.on('broadcast', { event: 'webrtc-signal' }, (payload: any) => {
+      if (!active) return; 
+      
       const { from, to, signal } = payload.payload;
-      // Only process signals intended for me, from the opponent, and when peer exists
-      if (to === myName && from === opponent && peerRef.current) {
+      
+      // CRITICAL TS FIX: Explicit inline check taaki TypeScript ko pata chale 'peerRef.current' zinda hai
+      if (
+        to === myName && 
+        from === opponent && 
+        peerRef.current && 
+        !(peerRef.current as any).destroyed
+      ) {
         try {
           peerRef.current.signal(signal);
         } catch (err) {
@@ -140,9 +149,9 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
     });
 
     return () => {
-      peerDestroyed = true;
+      active = false; 
       if (peerRef.current) {
-        peerRef.current.destroy();
+        try { (peerRef.current as any).destroy(); } catch (e) {}
         peerRef.current = null;
       }
       setIsWebRTCConnected(false);

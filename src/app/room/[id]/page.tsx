@@ -91,7 +91,10 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     players,
   });
 
-  const { isSpeaking: mySpeaking, audioLevel: myAudioLevel } = useAudioAnalyzer(localStream);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isCamOff, setIsCamOff] = useState(false);
+
+const { isSpeaking: mySpeaking, audioLevel: myAudioLevel } = useAudioAnalyzer(localStream);
   const { isSpeaking: oppSpeaking, audioLevel: oppAudioLevel } = useAudioAnalyzer(remoteStream);
 
   const { broadcastTyping, opponentTyping } = useTypingBroadcast({
@@ -112,6 +115,26 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
   });
 
   const isHost = players.sort()[0] === myName;
+
+  const toggleMic = () => {
+    if (localStream) {
+      const audioTrack = localStream.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsMicMuted(!audioTrack.enabled);
+      }
+    }
+  };
+
+  const toggleCam = () => {
+    if (localStream) {
+      const videoTrack = localStream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        setIsCamOff(!videoTrack.enabled);
+      }
+    }
+  };
 
   const lockSyncRef = useRef({ roasts, playlist, currentVideoIndex, isPlaying, playerStates, battlePhase });
   useEffect(() => {
@@ -547,11 +570,34 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
 
         <div className="w-full flex-1 flex flex-col lg:flex-row gap-6 items-start justify-between max-w-[1600px] mx-auto">
           
-          {/* COLUMN LEFT: WEBRTC BOUNDS */}
+         {/* COLUMN LEFT: WEBRTC BOUNDS */}
           <div className="w-full lg:w-[24%] flex flex-col sm:flex-row lg:flex-col gap-4 shrink-0">
-            <div className="w-full lg:h-[220px]">
-              <FaceCam stream={localStream} playerName={`${myName} (YOU)`} isLocal={true} hp={playerStates[myName]?.hp ?? 100} isSpeaking={mySpeaking} playerColor="yellow" />
+            
+            {/* TERI SCREEN (LOCAL STREAM) WITH CONTROLS */}
+            <div className="w-full lg:h-[220px] relative group overflow-hidden rounded-2xl">
+              {/* isSpeaking me !isMicMuted lagaya hai taaki mute hone par border glow na kare */}
+              <FaceCam stream={localStream} playerName={`${myName} (YOU)`} isLocal={true} hp={playerStates[myName]?.hp ?? 100} isSpeaking={!isMicMuted && mySpeaking} playerColor="yellow" />
+              
+              {/* HOVER CONTROLS FOR MIC & CAM */}
+              <div className="absolute top-2 right-2 flex gap-2 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                <button onClick={toggleMic} className={`p-2 rounded-xl backdrop-blur-md border shadow-lg transition-all ${isMicMuted ? 'bg-red-500/80 border-red-400 text-white' : 'bg-black/60 border-white/10 text-yellow-400 hover:bg-black/80'}`}>
+                  {isMicMuted ? '🔇' : '🎙️'}
+                </button>
+                <button onClick={toggleCam} className={`p-2 rounded-xl backdrop-blur-md border shadow-lg transition-all ${isCamOff ? 'bg-red-500/80 border-red-400 text-white' : 'bg-black/60 border-white/10 text-yellow-400 hover:bg-black/80'}`}>
+                  {isCamOff ? '🚫' : '📸'}
+                </button>
+              </div>
+
+              {/* PERMANENT INDICATORS (Jab off ho) */}
+              {(isMicMuted || isCamOff) && (
+                <div className="absolute bottom-[3.5rem] left-2 flex gap-1 z-20">
+                  {isMicMuted && <span className="bg-red-500/90 text-white text-[9px] font-black px-1.5 py-0.5 rounded shadow-md animate-pulse tracking-widest border border-red-700">MUTED</span>}
+                  {isCamOff && <span className="bg-red-500/90 text-white text-[9px] font-black px-1.5 py-0.5 rounded shadow-md animate-pulse tracking-widest border border-red-700">CAM OFF</span>}
+                </div>
+              )}
             </div>
+
+            {/* OPPONENT SCREEN (Waise hi rahega) */}
             <div className="w-full lg:h-[220px]">
               {opponentName ? (
                 <FaceCam stream={remoteStream} playerName={opponentName} isLocal={false} hp={playerStates[opponentName]?.hp ?? 100} isSpeaking={oppSpeaking} playerColor="cyan" />
