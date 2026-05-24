@@ -17,11 +17,12 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
 
   const peerRef = useRef<PeerInstance | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const isInitiatorRef = useRef(false);
+  const pendingSignalsRef = useRef<any[]>([]);
 
-  // 1. Request local camera and microphone stream
+  // 1. Camera Access
   useEffect(() => {
     let active = true;
+    console.log("[WebRTC] Requesting Camera/Mic...");
 
     async function initLocalStream() {
       try {
@@ -29,30 +30,28 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
           video: { width: 640, height: 480, facingMode: 'user' },
           audio: true,
         });
+        console.log("[WebRTC] Camera accessed successfully.");
         if (active) {
           setLocalStream(stream);
           localStreamRef.current = stream;
         }
       } catch (err: any) {
-        console.error('Failed to get user media:', err);
-        if (active) {
-          setError('Camera/Mic permission denied or unavailable');
-        }
+        console.error('[WebRTC] Camera Error:', err);
+        if (active) setError('Camera/Mic blocked!');
       }
     }
 
     initLocalStream();
-
     return () => {
       active = false;
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => track.stop());
-      }
+      if (localStreamRef.current) localStreamRef.current.getTracks().forEach((track) => track.stop());
     };
   }, []);
 
-  // 2. Set up the simple-peer WebRTC connection once channel and local stream are ready
+  // 2. Peer Setup
   useEffect(() => {
+    console.log(`[WebRTC State] Channel: ${!!channel}, Camera: ${!!localStream}, Total Players: ${players.length}`);
+    
     if (!channel || !localStream || players.length < 2) {
       if (peerRef.current) {
         try { (peerRef.current as any).destroy(); } catch (e) {}
@@ -64,27 +63,26 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
     }
 
     const opponent = players.find((p) => p !== myName);
-    if (!opponent) return;
+    if (!opponent) {
+      console.log("[WebRTC] No opponent found in players array!");
+      return;
+    }
 
-    const sorted = [...players].sort();
-    const isInitiator = sorted[0] === myName;
-    isInitiatorRef.current = isInitiator;
-
-    let active = true; // Stale listener block karne ka flag
+    // Strict alphabetical logic so only one initiates
+    const isInitiator = myName < opponent; 
+    let active = true;
 
     async function setupPeer() {
       try {
-        console.log(`Setting up simple-peer: initiator=${isInitiator}, me=${myName}, opponent=${opponent}`);
+        console.log(`[WebRTC] Creating Peer... Initiator: ${isInitiator}, Opponent: ${opponent}`);
         const peer = await createPeer(isInitiator, localStream!);
         
-        if (!active) {
-          peer.destroy();
-          return;
-        }
+        if (!active) { peer.destroy(); return; }
         peerRef.current = peer;
 
         peer.on('signal', (signal) => {
           if (!active) return;
+          console.log(`[WebRTC] Sending signal to ${opponent}`);
           channel.send({
             type: 'broadcast',
             event: 'webrtc-signal',
@@ -94,56 +92,39 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
 
         peer.on('stream', (stream) => {
           if (!active) return;
-          console.log('Received remote WebRTC stream!');
+          console.log('[WebRTC] 🎉 OPPONENT STREAM RECEIVED!');
           setRemoteStream(stream);
           setIsWebRTCConnected(true);
         });
 
-        peer.on('connect', () => {
-          if (!active) return;
-          console.log('WebRTC connection established!');
-          setIsWebRTCConnected(true);
-        });
+        // Check for pending queue
+        if (pendingSignalsRef.current.length > 0) {
+          console.log(`[WebRTC] Processing ${pendingSignalsRef.current.length} queued signals.`);
+          pendingSignalsRef.current.forEach((sig) => {
+            try { peer.signal(sig); } catch (e) {}
+          });
+          pendingSignalsRef.current = [];
+        }
 
-        peer.on('close', () => {
-          if (!active) return;
-          console.log('WebRTC connection closed.');
-          setIsWebRTCConnected(false);
-          setRemoteStream(null);
-        });
-
-        peer.on('error', (err) => {
-          if (!active) return;
-          console.error('WebRTC simple-peer error:', err);
-          setIsWebRTCConnected(false);
-          setRemoteStream(null);
-        });
-      } catch (err: any) {
-        if (!active) return;
-        console.error('Error creating simple-peer:', err);
-        setError('Failed to establish WebRTC peer connection');
+      } catch (err) {
+        console.error('[WebRTC] Peer Setup Crash:', err);
       }
     }
 
     setupPeer();
 
-    // 3. Listen to signaling messages
     const channelSub = channel.on('broadcast', { event: 'webrtc-signal' }, (payload: any) => {
       if (!active) return; 
-      
       const { from, to, signal } = payload.payload;
       
-      // CRITICAL TS FIX: Explicit inline check taaki TypeScript ko pata chale 'peerRef.current' zinda hai
-      if (
-        to === myName && 
-        from === opponent && 
-        peerRef.current && 
-        !(peerRef.current as any).destroyed
-      ) {
-        try {
-          peerRef.current.signal(signal);
-        } catch (err) {
-          console.error('Error signaling simple-peer:', err);
+      if (to === myName && from === opponent) {
+        console.log(`[WebRTC] Signal received from ${from}`);
+        const isPeerAlive = peerRef.current && !(peerRef.current as any).destroyed;
+        
+        if (isPeerAlive) {
+          try { peerRef.current!.signal(signal); } catch (e) {}
+        } else {
+          pendingSignalsRef.current.push(signal);
         }
       }
     });
@@ -156,13 +137,9 @@ export function useWebRTC({ channel, myName, players }: UseWebRTCProps) {
       }
       setIsWebRTCConnected(false);
       setRemoteStream(null);
+      pendingSignalsRef.current = [];
     };
   }, [channel, localStream, players, myName]);
 
-  return {
-    localStream,
-    remoteStream,
-    isWebRTCConnected,
-    error,
-  };
+  return { localStream, remoteStream, isWebRTCConnected, error };
 }
