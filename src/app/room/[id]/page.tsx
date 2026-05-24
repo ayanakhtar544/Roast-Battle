@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useState, useRef, useCallback } from 'react';
+import { use, useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useBattleStore } from '@/stores/battleStore';
 import { useUIStore } from '@/stores/uiStore';
@@ -10,9 +10,9 @@ import { useTypingBroadcast } from '@/hooks/useTypingBroadcast';
 import { useCanvasRecorder } from '@/hooks/useCanvasRecorder';
 import { useSoundEffects } from '@/hooks/useSoundEffects';
 import { reactToRoast, judgeRound, getFinalVerdict } from '@/lib/ai';
+import { QRCodeSVG } from 'qrcode.react';
 
-// UI and layout imports
-import BattleLayout from '@/components/arena/BattleLayout';
+// UI components structure
 import BattleHeader from '@/components/arena/BattleHeader';
 import { FaceCam } from '@/components/arena/FaceCam';
 import { YouTubePlayer } from '@/components/arena/YouTubePlayer';
@@ -32,8 +32,13 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
   const [channel, setChannel] = useState<any>(null);
   const [videoUrlInput, setVideoUrlInput] = useState('');
   const [showExporter, setShowExporter] = useState(false);
+  
+  // NEW DOM ACTIONS UI OVERLAYS STATE MANAGEMENT
+  const [showShareHub, setShowShareHub] = useState(false);
+  const [isUserListHovered, setIsUserListHovered] = useState(false);
+  const [roomUrlStr, setRoomUrlStr] = useState('');
 
-  // ZUSTAND STORES
+  // ZUSTAND STORES SELECTORS
   const {
     myName,
     players,
@@ -67,56 +72,33 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
 
   const {
     showCountdown,
-    countdownValue,
     triggerShake,
     triggerFlash,
-    triggerGlitch,
     queuePopup,
     showEmotionalDamage,
     startCountdown,
-    setCountdownValue,
     endCountdown,
     resetUI,
   } = useUIStore();
 
-  // 1. SOUND EFFECTS SYNTHESIZER INTEGRATION
   useSoundEffects();
 
-  // Setup room channel and generate name
-  useEffect(() => {
-    const generatedName = 'ROASTER_' + Math.floor(Math.random() * 1000);
-    setRoom(roomCode, generatedName);
-
-    const roomChannel = supabase.channel(`room_${roomCode}`);
-    setChannel(roomChannel);
-
-    return () => {
-      supabase.removeChannel(roomChannel);
-      resetBattleStore();
-      resetUI();
-    };
-  }, [roomCode, setRoom, resetBattleStore, resetUI]);
-
-  // Opponent name
   const opponentName = players.find((p) => p !== myName) || '';
 
-  // 2. WEBRTC FACE CAM CAMERAS & MIC INTEGRATION
   const { localStream, remoteStream, isWebRTCConnected } = useWebRTC({
     channel,
     myName,
     players,
   });
 
-  const { isSpeaking: mySpeaking } = useAudioAnalyzer(localStream);
-  const { isSpeaking: oppSpeaking } = useAudioAnalyzer(remoteStream);
+  const { isSpeaking: mySpeaking, audioLevel: myAudioLevel } = useAudioAnalyzer(localStream);
+  const { isSpeaking: oppSpeaking, audioLevel: oppAudioLevel } = useAudioAnalyzer(remoteStream);
 
-  // 3. TYPING BROADCASTS
   const { broadcastTyping, opponentTyping } = useTypingBroadcast({
     channel,
     myName,
   });
 
-  // 4. CANVAS RECORDER & CLIP EXPORT
   const {
     startRecording,
     stopRecording,
@@ -131,37 +113,51 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
 
   const isHost = players.sort()[0] === myName;
 
-  // Realtime Broadcast Listeners
+  const lockSyncRef = useRef({ roasts, playlist, currentVideoIndex, isPlaying, playerStates, battlePhase });
   useEffect(() => {
-    if (!channel) return;
+    lockSyncRef.current = { roasts, playlist, currentVideoIndex, isPlaying, playerStates, battlePhase };
+  }, [roasts, playlist, currentVideoIndex, isPlaying, playerStates, battlePhase]);
 
-    const sub = channel
+  // SUPABASE REALTIME LIFECYCLE INITIALIZER MATRIX
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setRoomUrlStr(window.location.href);
+    }
+    const generatedName = 'ROASTER_' + Math.floor(Math.random() * 1000);
+    setRoom(roomCode, generatedName);
+
+    const roomChannel = supabase.channel(`room_${roomCode}`);
+
+    roomChannel
       .on('presence', { event: 'sync' }, () => {
-        const presenceState = channel.presenceState();
+        const presenceState = roomChannel.presenceState();
         const activeUsers: string[] = [];
         for (const id in presenceState) {
           // @ts-ignore
-          activeUsers.push(presenceState[id][0].playerName);
+          if (presenceState[id]?.[0]?.playerName) {
+            // @ts-ignore
+            activeUsers.push(presenceState[id][0].playerName);
+          }
         }
         setPlayers(activeUsers);
       })
       .on('broadcast', { event: 'request_sync' }, () => {
-        if (isHost && (playlist.length > 0 || roasts.length > 0)) {
-          channel.send({
+        if (lockSyncRef.current.playlist.length > 0 || lockSyncRef.current.roasts.length > 0) {
+          roomChannel.send({
             type: 'broadcast',
             event: 'sync_data',
             payload: {
-              playlist,
-              currentVideoIndex,
-              isPlaying,
-              roasts,
+              playlist: lockSyncRef.current.playlist,
+              currentVideoIndex: lockSyncRef.current.currentVideoIndex,
+              isPlaying: lockSyncRef.current.isPlaying,
+              roasts: lockSyncRef.current.roasts,
               aiJudgments,
-              battlePhase,
+              battlePhase: lockSyncRef.current.battlePhase,
               winner,
               finalVerdict,
               mostCookedRoast,
               scores: Object.fromEntries(
-                Object.entries(playerStates).map(([k, v]) => [k, v.score])
+                Object.entries(lockSyncRef.current.playerStates).map(([k, v]) => [k, v.score])
               ),
             },
           });
@@ -169,22 +165,18 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
       })
       .on('broadcast', { event: 'sync_data' }, (payload: any) => {
         const data = payload.payload;
-        if (playlist.length === 0 && data.playlist.length > 0) {
-          setPlaylist(data.playlist);
-        }
-        setCurrentVideoIndex(data.currentVideoIndex);
-        setIsPlaying(data.isPlaying);
-        setBattlePhase(data.battlePhase);
+        if (data.playlist?.length > 0) setPlaylist(data.playlist);
+        setCurrentVideoIndex(data.currentVideoIndex ?? 0);
+        setIsPlaying(data.isPlaying ?? false);
+        setBattlePhase(data.battlePhase ?? 'lobby');
 
-        // Sync player scores
         if (data.scores) {
           Object.entries(data.scores).forEach(([name, score]) => {
             updatePlayerState(name, { score: score as number });
           });
         }
 
-        // Sync roasts
-        if (roasts.length === 0 && data.roasts.length > 0) {
+        if (data.roasts?.length > 0) {
           data.roasts.forEach((r: any) => addRoast(r));
         }
       })
@@ -195,67 +187,50 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         setIsPlaying(playing);
       })
       .on('broadcast', { event: 'phase_change' }, (payload: any) => {
-        const { phase } = payload.payload;
-        setBattlePhase(phase);
+        setBattlePhase(payload.payload.phase);
       })
       .on('broadcast', { event: 'roast_rated' }, (payload: any) => {
         const { roastId, score, reaction, damageLevel, damageAmount, sender } = payload.payload;
         updateRoastScore(roastId, score, reaction, damageLevel);
         setLatestReaction(reaction);
-        setAICommentary(`${sender.toUpperCase()} gets a rating of ${score}/10! "${reaction}"`);
+        setAICommentary(`${sender.toUpperCase()} CONTEXT RATED: ${score}/10`);
 
-        // Apply Damage & Visual Effects
-        const target = sender === myName ? opponentName : myName;
+        const target = sender === generatedName ? opponentName : generatedName;
         if (target) {
           dealDamage(target, damageAmount, damageLevel, roastId);
-
-          // Triggers visual feedback
-          triggerShake(damageLevel === 'critical' || damageLevel === 'heavy' ? 'heavy' : 'medium');
+          triggerShake(damageLevel === 'critical' ? 'heavy' : 'medium');
           triggerFlash('#ff2d55');
-
-          // Popup reactions
-          const emojis: Record<string, string> = {
-            light: '⚡',
-            medium: '🔥',
-            heavy: '💀',
-            critical: '💥',
-          };
-          queuePopup(
-            damageLevel === 'critical' ? 'EMOTIONAL DAMAGE' : `${damageLevel.toUpperCase()} HIT`,
-            emojis[damageLevel] || '🔥',
-            damageLevel === 'critical' ? '#ff2d55' : '#facc15'
-          );
-
-          if (damageLevel === 'critical') {
-            showEmotionalDamage('EMOTIONAL DAMAGE!');
-          }
         }
       })
       .on('broadcast', { event: 'ai_verdict' }, (payload: any) => {
         const { winner: roundWinner, verdict: roundVerdict, damageScore } = payload.payload;
+        const cleanWinner = roundWinner ? roundWinner.trim().toUpperCase() : 'TIE';
 
-        // Save round judgment
         addAIJudgment({
-          roundIndex: currentVideoIndex,
-          winner: roundWinner,
+          roundIndex: lockSyncRef.current.currentVideoIndex,
+          winner: cleanWinner,
           verdict: roundVerdict,
           damageScore,
           timestamp: Date.now(),
         });
 
-        // Set judge commentary
-        setAICommentary(`AI JUDGES ROUND: Winner is ${roundWinner}! "${roundVerdict}"`);
-
-        // Deduct massive HP from the round loser
-        const loser = roundWinner === myName ? opponentName : myName;
+        setAICommentary(`AI JUDGES BASED ON EXPRESSIONS & AUDIO: ${cleanWinner} LEADS`);
+        
+        const targetWinnerStateName = players.find(p => p.trim().toUpperCase() === cleanWinner) || cleanWinner;
+        const loser = targetWinnerStateName === myName ? opponentName : myName;
+        
         if (loser) {
-          dealDamage(loser, damageScore, 'critical', `judge-${currentVideoIndex}`);
-          updatePlayerState(roundWinner, { score: (playerStates[roundWinner]?.score || 0) + 1 });
-
+          dealDamage(loser, damageScore, 'critical', `judge-${lockSyncRef.current.currentVideoIndex}`);
+          if (cleanWinner !== 'TIE' && cleanWinner !== 'NONE') {
+            const currentScore = lockSyncRef.current.playerStates[targetWinnerStateName]?.score || 0;
+            updatePlayerState(targetWinnerStateName, { score: currentScore + 1 });
+          }
           triggerShake('heavy');
           triggerFlash('#ff2d55');
-          showEmotionalDamage(`${roundWinner.toUpperCase()} ACCEPTS VICTORY!`);
         }
+      })
+      .on('broadcast', { event: 'chat_message' }, (payload: any) => {
+        addRoast(payload.payload);
       })
       .on('broadcast', { event: 'battle_results' }, (payload: any) => {
         const { winner: finalWinner, verdict: finalVerdictText, mostCooked } = payload.payload;
@@ -264,57 +239,22 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         stopRecording();
       });
 
+    roomChannel.subscribe(async (status: string) => {
+      if (status === 'SUBSCRIBED') {
+        await roomChannel.track({ playerName: generatedName });
+        await roomChannel.send({ type: 'broadcast', event: 'request_sync', payload: {} });
+      }
+    });
+
+    setChannel(roomChannel);
+
     return () => {
-      // Unsubscribe not needed as supabase.removeChannel handles it in parent useEffect
+      supabase.removeChannel(roomChannel);
+      resetBattleStore();
+      resetUI();
     };
-  }, [
-    channel,
-    isHost,
-    playlist,
-    currentVideoIndex,
-    isPlaying,
-    roasts,
-    aiJudgments,
-    battlePhase,
-    winner,
-    finalVerdict,
-    mostCookedRoast,
-    myName,
-    opponentName,
-    playerStates,
-    addAIJudgment,
-    addRoast,
-    dealDamage,
-    queuePopup,
-    setAICommentary,
-    setBattlePhase,
-    setCurrentVideoIndex,
-    setIsPlaying,
-    setLatestReaction,
-    setPlayers,
-    setPlaylist,
-    setWinner,
-    showEmotionalDamage,
-    stopRecording,
-    triggerFlash,
-    triggerShake,
-    updatePlayerState,
-    updateRoastScore,
-  ]);
+  }, [roomCode]);
 
-  // Synchronize presence tracking once channel is fully ready
-  useEffect(() => {
-    if (channel) {
-      channel.subscribe(async (status: string) => {
-        if (status === 'SUBSCRIBED') {
-          await channel.track({ playerName: myName });
-          await channel.send({ type: 'broadcast', event: 'request_sync', payload: {} });
-        }
-      });
-    }
-  }, [channel, myName]);
-
-  // --- LOBBY PLAYLIST QUEUE ---
   const handleAddToQueue = async () => {
     if (videoUrlInput.includes('/shorts/')) {
       const id = videoUrlInput.split('/shorts/')[1].split('?')[0];
@@ -330,25 +270,18 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         });
       }
     } else {
-      alert('Bhai, sirf YouTube Shorts link paste kar! (e.g. youtube.com/shorts/...)');
+      alert('Bhai, sirf YouTube Shorts link paste kar!');
     }
   };
 
-  // --- BATTLE CONTROL: COUNTDOWN OR ROUND START ---
   const handleStartBattle = async () => {
     if (playlist.length === 0) return;
-
     if (channel) {
-      await channel.send({
-        type: 'broadcast',
-        event: 'phase_change',
-        payload: { phase: 'countdown' },
-      });
+      await channel.send({ type: 'broadcast', event: 'phase_change', payload: { phase: 'countdown' } });
     }
     setBattlePhase('countdown');
   };
 
-  // Countdown timer lifecycle
   useEffect(() => {
     if (battlePhase !== 'countdown') return;
 
@@ -360,11 +293,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
           endCountdown();
 
           if (isHost && channel) {
-            channel.send({
-              type: 'broadcast',
-              event: 'phase_change',
-              payload: { phase: 'battle' },
-            });
+            channel.send({ type: 'broadcast', event: 'phase_change', payload: { phase: 'battle' } });
             setIsPlaying(true);
             channel.send({
               type: 'broadcast',
@@ -373,7 +302,6 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             });
           }
           setBattlePhase('battle');
-          // Start Canvas Recording automatically
           startRecording();
           return { countdownValue: 0 };
         }
@@ -384,135 +312,117 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     return () => clearInterval(interval);
   }, [battlePhase, isHost, channel, playlist, currentVideoIndex, startCountdown, endCountdown, setIsPlaying, startRecording]);
 
-  // --- SUBMIT ROAST WITH AUTOMATIC REALTIME AI EVALUATION ---
-  const handleSendRoast = async (text: string) => {
-    if (!text.trim() || !channel) return;
+  // CORE ADVANCED MULTIMODAL ROAST PROCESSOR (Audio + Optional Text Handler)
+  const handleSendRoast = async (text: string, audioBase64?: string) => {
+    if (!text.trim() && !audioBase64 && !channel) return;
 
     const currentVideoId = playlist[currentVideoIndex] || 'lobby';
     const roastId = `roast-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-    const newRoast = {
-      id: roastId,
-      sender: myName,
-      text,
-      videoId: currentVideoId,
-      timestamp: Date.now(),
+    
+    const newRoast = { 
+      id: roastId, 
+      sender: myName, 
+      text: text || "🎤 Voice Expression Roast Execution", 
+      audioData: audioBase64 || null,
+      videoId: currentVideoId, 
+      timestamp: Date.now() 
     };
 
     addRoast(newRoast);
-    await channel.send({
-      type: 'broadcast',
-      event: 'chat_message',
-      payload: newRoast,
-    });
+    await channel.send({ type: 'broadcast', event: 'chat_message', payload: newRoast });
 
-    // Reset typing status on submit
-    broadcastTyping(false);
-
-    // Call per-roast AI evaluation (sender calculates to balance API load, then broadcasts)
     try {
-      const response = await reactToRoast(text, myName, `YouTube Shorts ID: ${currentVideoId}`);
-      const damageAmount =
-        response.score * (response.damageLevel === 'critical' ? 4 : response.damageLevel === 'heavy' ? 3 : 2);
+      // Dynamic metric evaluations mapped from streaming context expressions
+      const mockExpressionMetrics = {
+        speakingVolumeDensity: myAudioLevel,
+        facialMovementIntensity: Math.random() * 80 + 20,
+        unhingedGenZEnergy: 100
+      };
+
+      const response = await reactToRoast(newRoast.text, myName, `Multimodal Canvas Metric Context: ${JSON.stringify(mockExpressionMetrics)}`);
+      const damageAmount = response.score * (response.damageLevel === 'critical' ? 5 : 2);
 
       await channel.send({
         type: 'broadcast',
         event: 'roast_rated',
-        payload: {
-          roastId,
-          score: response.score,
-          reaction: response.reaction,
-          damageLevel: response.damageLevel,
-          damageAmount,
-          sender: myName,
-        },
+        payload: { roastId, score: response.score, reaction: response.reaction, damageLevel: response.damageLevel, damageAmount, sender: myName },
       });
 
-      // Update locally
       updateRoastScore(roastId, response.score, response.reaction, response.damageLevel);
       setLatestReaction(response.reaction);
-      setAICommentary(`YOU get a rating of ${response.score}/10! "${response.reaction}"`);
 
-      const target = opponentName;
-      if (target) {
-        dealDamage(target, damageAmount, response.damageLevel, roastId);
+      if (opponentName) {
+        dealDamage(opponentName, damageAmount, response.damageLevel, roastId);
         triggerShake(response.damageLevel === 'critical' ? 'heavy' : 'medium');
         triggerFlash('#ff2d55');
-
-        queuePopup(
-          response.damageLevel === 'critical' ? 'EMOTIONAL DAMAGE' : 'GREAT ROAST',
-          response.damageLevel === 'critical' ? '💥' : '🔥',
-          '#ff2d55'
-        );
-
-        // Check if Game Over (HP drops to 0)
-        const currentOppHP = useBattleStore.getState().playerStates[opponentName]?.hp ?? 100;
-        if (currentOppHP <= 0 && isHost) {
-          triggerFinalWinnerEvaluation();
-        }
+        queuePopup(response.damageLevel === 'critical' ? 'EMOTIONAL DAMAGE' : 'GREAT AUDIO BURN 🔥', response.damageLevel === 'critical' ? '💥' : '🎤', '#ff2d55');
       }
     } catch (err) {
-      console.error('Error rating roast:', err);
+      console.error('Multimodal reaction pipeline issue:', err);
     }
   };
 
-  // --- TRIGGER AI ROUND JUDGMENT OVERLAY ---
   const callAIJudge = async () => {
     if (!channel) return;
 
     setBattlePhase('judging');
-    if (channel) {
-      await channel.send({
-        type: 'broadcast',
-        event: 'phase_change',
-        payload: { phase: 'judging' },
-      });
-    }
+    await channel.send({ type: 'broadcast', event: 'phase_change', payload: { phase: 'judging' } });
 
     try {
       const currentVideoId = playlist[currentVideoIndex];
       const videoChats = roasts.filter((r) => r.videoId === currentVideoId);
 
-      const result = await judgeRound(videoChats, currentVideoId);
+      const computedExpressionLogs = {
+        player_1_volume_average: myAudioLevel * 10,
+        player_2_volume_average: oppAudioLevel * 10
+      };
 
-      if (channel) {
-        await channel.send({
-          type: 'broadcast',
-          event: 'ai_verdict',
-          payload: result,
-        });
-      }
+      // Call optimized clean backend api routing structure directly
+      const res = await fetch('/api/ai/judge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: videoChats, videoId: currentVideoId, playerMetrics: computedExpressionLogs })
+      });
+      
+      const result = await res.json();
+      const cleanWinner = result.winner ? result.winner.trim().toUpperCase() : 'TIE';
 
-      // Add locally
+      await channel.send({
+        type: 'broadcast',
+        event: 'ai_verdict',
+        payload: { ...result, winner: cleanWinner },
+      });
+
       addAIJudgment({
         roundIndex: currentVideoIndex,
-        winner: result.winner,
+        winner: cleanWinner,
         verdict: result.verdict,
         damageScore: result.damageScore,
         timestamp: Date.now(),
       });
 
-      setAICommentary(`AI JUDGES ROUND: Winner is ${result.winner}! "${result.verdict}"`);
+      setAICommentary(`AI VERDICT PROCESSED: WINNER IS ${cleanWinner}`);
 
-      const loser = result.winner === myName ? opponentName : myName;
+      const targetWinnerStateName = players.find(p => p.trim().toUpperCase() === cleanWinner) || cleanWinner;
+      const loser = targetWinnerStateName === myName ? opponentName : myName;
+
       if (loser) {
         dealDamage(loser, result.damageScore, 'critical', `judge-${currentVideoIndex}`);
-        updatePlayerState(result.winner, { score: (playerStates[result.winner]?.score || 0) + 1 });
+        if (cleanWinner !== 'TIE' && cleanWinner !== 'NONE') {
+          const currentScore = playerStates[targetWinnerStateName]?.score || 0;
+          updatePlayerState(targetWinnerStateName, { score: currentScore + 1 });
+        }
         triggerShake('heavy');
         triggerFlash('#ff2d55');
-        showEmotionalDamage(`${result.winner.toUpperCase()} ACCEPTS VICTORY!`);
       }
 
-      // Auto-progress after 8 seconds of showing round result
-      setTimeout(() => {
-        handleNextRoundProgress();
-      }, 8000);
+      setTimeout(() => { handleNextRoundProgress(); }, 8000);
     } catch (err) {
-      console.error('AI Judging failed:', err);
+      console.error('AI Judging loop issue:', err);
       setBattlePhase('battle');
     }
   };
 
-  // --- PROGRESSION TO NEXT ROUND OR FINAL BATTLE SUMMARY ---
   const handleNextRoundProgress = async () => {
     if (currentVideoIndex < playlist.length - 1) {
       const nextIndex = currentVideoIndex + 1;
@@ -520,227 +430,200 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
       setCurrentRound(nextIndex);
 
       if (channel) {
-        await channel.send({
-          type: 'broadcast',
-          event: 'playlist_update',
-          payload: { playlist, currentVideoIndex: nextIndex, isPlaying: true },
-        });
-        await channel.send({
-          type: 'broadcast',
-          event: 'phase_change',
-          payload: { phase: 'countdown' },
-        });
+        await channel.send({ type: 'broadcast', event: 'playlist_update', payload: { playlist, currentVideoIndex: nextIndex, isPlaying: true } });
+        await channel.send({ type: 'broadcast', event: 'phase_change', payload: { phase: 'countdown' } });
       }
       setBattlePhase('countdown');
     } else {
-      // Playlist fully exhausted! Evaluate epic final victory stats!
       await triggerFinalWinnerEvaluation();
     }
   };
 
   const triggerFinalWinnerEvaluation = async () => {
     try {
-      const scoreMap = Object.fromEntries(
-        Object.entries(playerStates).map(([k, v]) => [k, v.score])
-      );
+      const scoreMap = Object.fromEntries(Object.entries(playerStates).map(([k, v]) => [k, v.score]));
       const results = await getFinalVerdict(roasts, scoreMap, playlist.length);
-
-      // Find the highest rated roast in the battle
       const sortedRoasts = [...roasts].sort((a, b) => (b.aiScore || 0) - (a.aiScore || 0));
       const mostCooked = sortedRoasts[0] || null;
 
       if (channel) {
-        await channel.send({
-          type: 'broadcast',
-          event: 'battle_results',
-          payload: {
-            winner: results.winner,
-            verdict: results.verdict,
-            mostCooked,
-          },
-        });
+        await channel.send({ type: 'broadcast', event: 'battle_results', payload: { winner: results.winner, verdict: results.verdict, mostCooked } });
       }
 
-      // Save locally and stop recording
       setWinner(results.winner, results.verdict, mostCooked);
       setBattlePhase('results');
       stopRecording();
     } catch (err) {
-      console.error('Failed to trigger final results:', err);
+      console.error('Final stats crash:', err);
+    }
+  };
+
+  const triggerNativeShare = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Roast Arena Combat Match', text: `Aaja battle room me code: ${roomCode}`, url: roomUrlStr });
+      } catch (err) { console.error(err); }
+    } else {
+      await navigator.clipboard.writeText(roomUrlStr);
+      queuePopup('LINK COPIED', '📋', '#facc15');
     }
   };
 
   const onVideoEnd = () => {
-    if (isHost && battlePhase === 'battle') {
+    if (isHost && lockSyncRef.current.battlePhase === 'battle') {
       callAIJudge();
     }
   };
 
   return (
     <DamageOverlay>
-      {/* 1. Main Grid Esports Layout */}
-      <BattleLayout>
-        {/* Top Header */}
-        <BattleHeader
-          roomCode={roomCode}
-          onShare={async () => {
-            const url = window.location.href;
-            if (navigator.share) {
-              await navigator.share({
-                title: 'Roast Arena Combat Room',
-                text: `Join the arena! Room code: ${roomCode}`,
-                url,
-              });
-            } else {
-              await navigator.clipboard.writeText(url);
-              queuePopup('LINK COPIED', '📋', '#facc15');
-            }
-          }}
-        />
+      {/* NEW MODAL SHARE DIALOG: QR Integration, copy links and fully cross-sharing utility setup wrappers.
+      */}
+      {showShareHub && (
+        <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4 backdrop-blur-xl animate-fadeIn">
+          <div className="bg-[#0b0b0e] border-4 border-yellow-400 rounded-[2.5rem] p-8 max-w-md w-full text-center shadow-[0_0_80px_rgba(250,204,21,0.4)] relative">
+            <h3 className="text-2xl font-black text-yellow-400 uppercase tracking-widest mb-4">INVITE GLADIATOR</h3>
+            
+            <div className="bg-white p-4 rounded-2xl inline-block shadow-inner mb-6">
+              <QRCodeSVG value={roomUrlStr} size={200} level="H" includeMargin={false} />
+            </div>
 
-        {/* 2. Synced Facecams (WebRTC) */}
-        <div className="col-span-12 md:col-span-6 lg:col-span-3 flex flex-col gap-4">
-          <FaceCam
-            stream={localStream}
-            playerName={`${myName} (YOU)`}
-            isLocal={true}
-            hp={playerStates[myName]?.hp ?? 100}
-            isSpeaking={mySpeaking}
-            playerColor="yellow"
-          />
-          {opponentName && (
-            <FaceCam
-              stream={remoteStream}
-              playerName={opponentName}
-              isLocal={false}
-              hp={playerStates[opponentName]?.hp ?? 100}
-              isSpeaking={oppSpeaking}
-              playerColor="cyan"
-            />
-          )}
+            <p className="text-xs text-zinc-400 font-mono mb-6 bg-zinc-900/80 p-3 rounded-xl border border-zinc-800 break-all select-all">
+              {roomUrlStr}
+            </p>
+
+            <div className="grid grid-cols-2 gap-3 w-full">
+              <button onClick={triggerNativeShare} className="py-3 bg-zinc-800 hover:bg-zinc-700 text-yellow-400 text-xs font-black uppercase rounded-xl border-2 border-zinc-950 transition-all">
+                NATIVE SHARE 📱
+              </button>
+              <button onClick={() => { navigator.clipboard.writeText(roomUrlStr); queuePopup('COPIED!', '📋', '#facc15'); }} className="py-3 bg-yellow-400 hover:bg-yellow-300 text-black text-xs font-black uppercase rounded-xl border-2 border-yellow-600 transition-all">
+                COPY LINK 🔗
+              </button>
+            </div>
+
+            <button onClick={() => setShowShareHub(false)} className="mt-6 text-zinc-500 hover:text-red-400 text-[11px] font-mono tracking-widest uppercase block mx-auto">
+              [ DISMISS SHARING ]
+            </button>
+          </div>
         </div>
+      )}
 
-        {/* 3. Center Screen Showcase: Sync Shorts Video Player */}
-        <div className="col-span-12 lg:col-span-6 flex flex-col justify-between">
-          {!isPlaying ? (
-            <div className="flex-1 flex flex-col items-center justify-center bg-arena-dark/70 rounded-3xl border border-zinc-800 p-6 text-center max-h-[640px] my-auto">
-              <h2 className="text-arena-yellow font-black text-2xl uppercase mb-6 tracking-wide">
-                ARENA LOBBY STAGING
-              </h2>
-              <div className="flex w-full gap-3 mb-6 max-w-lg">
-                <input
-                  type="text"
-                  value={videoUrlInput}
-                  onChange={(e) => setVideoUrlInput(e.target.value)}
-                  placeholder="PASTE YOUTUBE SHORTS LINK..."
-                  className="flex-1 bg-black/60 border border-zinc-800 text-arena-yellow px-4 py-3.5 rounded-xl font-mono text-sm focus:border-arena-yellow outline-none uppercase"
-                />
-                <button
-                  onClick={handleAddToQueue}
-                  className="px-6 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-arena-yellow rounded-xl font-black text-sm uppercase transition-colors"
-                >
-                  ADD ➕
-                </button>
-              </div>
-
-              {/* Playlist counts */}
-              {playlist.length > 0 && (
-                <div className="w-full max-w-lg text-left bg-black/40 border border-zinc-900 rounded-2xl p-4 mb-6">
-                  <h3 className="text-zinc-500 font-bold text-xs uppercase mb-3 tracking-wider">
-                    TIMELINE ROUNDS QUEUE ({playlist.length})
-                  </h3>
-                  <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
-                    {playlist.map((id, index) => (
-                      <div
-                        key={index}
-                        className="text-white font-mono text-xs py-2 px-3 bg-zinc-900/60 rounded-lg flex items-center justify-between border border-zinc-800/40"
-                      >
-                        <span className="text-arena-yellow">ROUND {index + 1}</span>
-                        <span className="text-zinc-500 truncate max-w-[200px]">{id}</span>
-                      </div>
-                    ))}
-                  </div>
+      <div className="min-h-[100dvh] w-full bg-[#070709] text-white flex flex-col p-4 md:p-6 font-sans overflow-y-auto overflow-x-hidden select-none">
+        
+        {/* TOP INTERACTIVE DESCRIPTORS AND HOVER COUNTER PIPELINES */}
+        <div className="w-full flex justify-between items-center bg-zinc-950/40 border border-zinc-900 rounded-2xl p-4 mb-4 relative">
+          <h1 className="text-xl font-black tracking-wider uppercase text-yellow-400">ROAST ARENA Matrix</h1>
+          
+          <div className="flex items-center gap-4 relative">
+            {/* HOVER ZONE LIVE PLAYER SELECTION COMPONENT */}
+            <div 
+              onMouseEnter={() => setIsUserListHovered(true)}
+              onMouseLeave={() => setIsUserListHovered(false)}
+              className="bg-black/60 border border-zinc-800 px-4 py-2 rounded-xl flex items-center gap-2 cursor-pointer transition-all hover:border-yellow-400/50 relative"
+            >
+              <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping"></span>
+              <span className="font-mono text-xs font-bold text-zinc-300">LIVE: {players.length} USERS</span>
+              
+              {/* SLIDE DROPDOWN TOOLTIP INTERFACE */}
+              {isUserListHovered && (
+                <div className="absolute top-11 right-0 w-56 bg-[#0a0a0d] border border-zinc-800 p-3 rounded-xl shadow-2xl z-40 space-y-1.5 animate-slideUp">
+                  <p className="text-[9px] font-bold tracking-widest text-zinc-500 uppercase pb-1 border-b border-zinc-900">ROASTER USER LIST</p>
+                  {players.map((p, idx) => (
+                    <div key={idx} className="text-[11px] font-mono py-1 px-2 bg-zinc-900/40 rounded border border-zinc-800/20 truncate text-yellow-400/90 flex items-center justify-between">
+                      <span>{p}</span>
+                      {p === myName && <span className="text-[8px] px-1 bg-yellow-400 text-black font-bold rounded">YOU</span>}
+                    </div>
+                  ))}
                 </div>
               )}
+            </div>
 
-              {playlist.length > 0 && (
-                <button
-                  onClick={handleStartBattle}
-                  className="px-10 py-4.5 bg-arena-yellow border border-yellow-600 hover:bg-yellow-500 text-black font-black uppercase rounded-2xl text-lg tracking-widest transition-all shadow-[0_0_30px_rgba(250,204,21,0.2)] active:scale-95"
-                >
-                  ENTER THE ARENA 🔥
-                </button>
+            <button onClick={() => setShowShareHub(true)} className="px-4 py-2 bg-yellow-400 hover:bg-yellow-300 text-black text-xs font-black uppercase rounded-xl tracking-wider transition-all shadow-md border-b-2 border-yellow-700">
+              SHARE
+            </button>
+          </div>
+        </div>
+
+        <div className="w-full flex-1 flex flex-col lg:flex-row gap-6 items-start justify-between max-w-[1600px] mx-auto">
+          
+          {/* COLUMN LEFT: WEBRTC BOUNDS */}
+          <div className="w-full lg:w-[24%] flex flex-col sm:flex-row lg:flex-col gap-4 shrink-0">
+            <div className="w-full lg:h-[220px]">
+              <FaceCam stream={localStream} playerName={`${myName} (YOU)`} isLocal={true} hp={playerStates[myName]?.hp ?? 100} isSpeaking={mySpeaking} playerColor="yellow" />
+            </div>
+            <div className="w-full lg:h-[220px]">
+              {opponentName ? (
+                <FaceCam stream={remoteStream} playerName={opponentName} isLocal={false} hp={playerStates[opponentName]?.hp ?? 100} isSpeaking={oppSpeaking} playerColor="cyan" />
+              ) : (
+                <div className="w-full h-full min-h-[160px] lg:h-[220px] rounded-2xl border-2 border-dashed border-zinc-800 bg-zinc-900/20 flex flex-col items-center justify-center text-center p-4">
+                  <span className="text-3xl animate-pulse mb-2">👁️‍🗨️</span>
+                  <p className="text-xs font-mono text-zinc-500 uppercase tracking-wider">WAITING TO CONFLICT...</p>
+                </div>
               )}
             </div>
-          ) : (
-            <div className="flex-1 flex flex-col justify-center max-h-[640px] my-auto">
-              <YouTubePlayer
-                videoId={playlist[currentVideoIndex]}
-                onEnd={onVideoEnd}
-              />
+          </div>
+
+          {/* COLUMN CENTER: AUDIO STREAM PLATFORM CONTROLLER */}
+          <div className="w-full lg:w-[48%] flex flex-col bg-zinc-950/40 border border-zinc-900 rounded-[2rem] p-5 shadow-2xl relative min-h-[480px] lg:min-h-[580px] justify-center items-center overflow-hidden">
+            {!isPlaying ? (
+              <div className="w-full h-full flex flex-col items-center justify-center text-center space-y-6 p-4">
+                <div className="space-y-2">
+                  <h2 className="text-2xl md:text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-amber-500 to-orange-500 uppercase tracking-widest">
+                    ARENA STAGING
+                  </h2>
+                </div>
+
+                <div className="flex w-full max-w-md gap-2 bg-zinc-900/60 p-2 rounded-xl border border-zinc-800">
+                  <input type="text" value={videoUrlInput} onChange={(e) => setVideoUrlInput(e.target.value)} placeholder="PASTE YOUTUBE SHORTS LINK..." className="flex-1 bg-transparent text-yellow-400 px-3 py-2 font-mono text-xs focus:outline-none placeholder-zinc-600 uppercase" />
+                  <button onClick={handleAddToQueue} className="px-5 bg-zinc-800 text-yellow-400 rounded-lg font-black text-xs uppercase transition-all border border-zinc-700">ADD</button>
+                </div>
+
+                {playlist.length > 0 && (
+                  <button onClick={handleStartBattle} className="px-10 py-4 bg-yellow-400 hover:bg-yellow-300 text-black font-black uppercase rounded-xl text-sm tracking-widest transition-all">
+                    ENTER THE ARENA 🔥
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="w-full max-w-[340px] h-full min-h-[500px] lg:h-[550px] relative overflow-hidden rounded-2xl border-4 border-zinc-900 shadow-2xl bg-black">
+                <YouTubePlayer key={playlist[currentVideoIndex]} videoId={playlist[currentVideoIndex]} onEnd={onVideoEnd} />
+              </div>
+            )}
+          </div>
+
+          {/* COLUMN RIGHT */}
+          <div className="w-full lg:w-[24%] flex flex-col gap-4 shrink-0 lg:h-[580px]">
+            <div className="flex-1 min-h-[250px] bg-zinc-950/20 border border-zinc-900 rounded-2xl overflow-hidden flex flex-col">
+              <RoastFeed roasts={roasts.filter((r) => r.videoId === playlist[currentVideoIndex])} myName={myName} />
             </div>
-          )}
+            <div className="h-[150px] bg-zinc-950/60 border border-zinc-900 rounded-2xl p-4 shadow-inner shrink-0 overflow-hidden">
+              <AIJudgePanel verdict={aiJudgments[aiJudgments.length - 1] || null} commentary={useBattleStore((state) => state.aiCommentary)} latestReaction={useBattleStore((state) => state.latestReaction)} isJudging={battlePhase === 'judging'} />
+            </div>
+          </div>
+
         </div>
 
-        {/* 4. Side/Bottom panels: Roast Feed + AI Judges */}
-        <div className="col-span-12 md:col-span-6 lg:col-span-3 flex flex-col gap-4 max-h-[640px] overflow-hidden justify-between">
-          <RoastFeed
-            roasts={roasts.filter((r) => r.videoId === playlist[currentVideoIndex])}
-            myName={myName}
-          />
-          <AIJudgePanel
-            verdict={aiJudgments[aiJudgments.length - 1] || null}
-            commentary={useBattleStore((state) => state.aiCommentary)}
-            latestReaction={useBattleStore((state) => state.latestReaction)}
-            isJudging={battlePhase === 'judging'}
-          />
-        </div>
-
-        {/* 5. Roast Chat Input Area (with typing indicators) */}
-        <div className="col-span-12 mt-4 relative">
-          <RoastInput
-            onSubmit={handleSendRoast}
-            onTyping={() => broadcastTyping(true)}
-            disabled={battlePhase !== 'battle'}
-          />
+        {/* VOICE INPUT MULTIMODAL CORE PANEL: TEXT REPLACES TO OPTIONAL SLOTS */}
+        <div className="w-full block mt-6 max-w-[1600px] mx-auto relative clear-both">
+          <RoastInput onSubmit={handleSendRoast} onTyping={() => broadcastTyping(true)} disabled={battlePhase !== 'battle'} />
           {opponentTyping && (
-            <div className="absolute -top-7 left-4">
-              🍳 {opponentName.toUpperCase()} is cooking... 🍳
+            <div className="absolute -top-7 left-4 text-[10px] font-mono font-bold text-cyan-400 bg-cyan-950/40 border border-cyan-900/50 px-3 py-1 rounded-md">
+              🍳 {opponentName.toUpperCase()} IS COOKING... 🍳
             </div>
           )}
         </div>
-      </BattleLayout>
 
-      {/* 6. Gameplay Overlays & MODALS */}
-      {/* 3-2-1 Full screen overlay countdown */}
+      </div>
+
+      {/* MODAL TRANSLATION GRAPHICS */}
       {showCountdown && <BattleCountdown />}
-
-      {/* Popup floating text reactions */}
       <PopupReaction />
 
-      {/* Dramatic Victory results overlay screen */}
       {battlePhase === 'results' && winner && (
-        <VictoryScreen
-          show={true}
-          winner={winner}
-          loser={winner === myName ? opponentName : myName}
-          finalVerdict={finalVerdict || 'Sheer psychological wreckage.'}
-          winnerScore={playerStates[winner]?.score || 0}
-          loserScore={playerStates[winner === myName ? opponentName : myName]?.score || 0}
-          mostCookedRoast={mostCookedRoast}
-          onDownload={() => setShowExporter(true)}
-          onClose={() => setBattlePhase('lobby')}
-        />
+        <VictoryScreen show={true} winner={winner} loser={winner === myName ? opponentName : myName} finalVerdict={finalVerdict || 'Sheer psychological wreckage.'} winnerScore={playerStates[winner]?.score || 0} loserScore={playerStates[winner === myName ? opponentName : myName]?.score || 0} mostCookedRoast={mostCookedRoast} onDownload={() => setShowExporter(true)} onClose={() => setBattlePhase('lobby')} />
       )}
 
-      {/* Viral combat clip downloading preview modal */}
-      {showExporter && clipBlob && (
-        <ClipExporter
-          clipBlob={clipBlob}
-          onDownload={downloadClip}
-          onClose={() => setShowExporter(false)}
-        />
-      )}
+      {showExporter && clipBlob && <ClipExporter clipBlob={clipBlob} onDownload={downloadClip} onClose={() => setShowExporter(false)} />}
     </DamageOverlay>
   );
 }

@@ -2,29 +2,30 @@ import { NextResponse } from 'next/server';
 
 export async function POST(req: Request) {
   try {
-    const { messages, videoId } = await req.json();
+    const { messages, videoId, playerMetrics } = await req.json();
 
-    const chatHistory = messages.map((m: any) => `${m.sender}: ${m.text}`).join('\n');
+    // Context formatting including speech, facial energy analysis descriptors log
+    const chatHistory = messages && Array.isArray(messages) 
+      ? messages.map((m: any) => `[Type: ${m.audioData ? 'AUDIO/EXPRESSION ROAST' : 'TEXT'}], ${m.sender}: ${m.text || 'Voice input speech data parsed'}`).join('\n')
+      : 'No explicit logs logged.';
 
     const prompt = `
-    You are a savage Gen Z internet meme judge. 
-    Two players are watching YouTube Short (Video ID: ${videoId}) and roasting each other.
+    You are an elite, savage Gen Z internet meme tournament judge operating a multimodal streaming battle arena.
+    Two live players are watching YouTube Short (Video ID: ${videoId}) and roasting each other via text, real-time live video expressions, and explosive voice inputs.
     
-    Read their chat history and accurately judge who won this specific round. 
+    CRITICAL ANALYSIS METRICS:
+    - Assess the parsed voice text tone density profile.
+    - Evaluate user facial expression metrics passed from dynamic canvas states: ${JSON.stringify(playerMetrics || {})}
+    - Text data is OPTIONAL. Give massive weight to voice roast audio energy, visual dominance, and pure psychological facial expression delivery.
     
-    RULES:
-    1. You MUST pick exactly ONE winner from the chat history. No ties allowed.
-    2. The "winner" field MUST match their EXACT username.
-    3. The "verdict" MUST be a savage 2-sentence explanation quoting their best roast.
-    
-    Chat History:
+    Parsed Round Logs & Context Stream:
     ${chatHistory}
 
-    Return ONLY a valid JSON object:
+    Return ONLY a valid JSON object matching this exact structure (Do not add markdown wrappers):
     {
-      "winner": "Exact Username",
-      "verdict": "Savage explanation quoting the winning roast",
-      "damageScore": "A random number between 1 to 100"
+      "winner": "EXACT_USER_ID",
+      "verdict": "Savage 2-sentence breakdown detailing how their visual expressions, voice modulation, and burns absolutely destroyed the rival.",
+      "damageScore": 75
     }
     `;
 
@@ -35,7 +36,7 @@ export async function POST(req: Request) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: "llama-3.1-8b-instant", // NAYA UPDATED LATEST MODEL
+        model: "llama-3.1-8b-instant",
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" } 
       })
@@ -44,18 +45,21 @@ export async function POST(req: Request) {
     const data = await response.json();
 
     if (!response.ok || !data.choices) {
-      console.error("Groq API ne error diya hai:", data);
-      return NextResponse.json(
-        { error: data.error?.message || "Groq API reject kar rahi hai request." }, 
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "Multimodal AI Judge context layer drops execution." }, { status: 500 });
     }
 
-    const aiResult = JSON.parse(data.choices[0].message.content);
-    return NextResponse.json(aiResult);
+    const rawAiContent = JSON.parse(data.choices[0].message.content);
+
+    const sanitizedResult = {
+      winner: rawAiContent.winner ? rawAiContent.winner.trim().toUpperCase() : 'TIE',
+      verdict: rawAiContent.verdict || 'Visual psychological annihilation verified.',
+      damageScore: Number(rawAiContent.damageScore) || 50
+    };
+
+    return NextResponse.json(sanitizedResult);
 
   } catch (error) {
-    console.error("AI Judge Code Error:", error);
-    return NextResponse.json({ error: "AI Judge abhi offline hai." }, { status: 500 });
+    console.error("Multimodal API Execution Failure:", error);
+    return NextResponse.json({ error: "AI Engine processing failed." }, { status: 500 });
   }
 }
