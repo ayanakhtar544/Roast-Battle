@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 body {
-  background-color: #09090b; /* Ekdum dark hacker wali vibe */
-  color: #fafafa; /* Text ka color off-white */
+  background-color: #09090b; 
+  color: #fafafa; 
   font-family: Arial, sans-serif;
 }
