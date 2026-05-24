@@ -1,9 +1,262 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ===== ROOT VARIABLES ===== */
+:root {
+  --arena-black: #09090b;
+  --arena-dark: #0f0f11;
+  --arena-red: #ff2d55;
+  --arena-fire: #ff6b35;
+  --arena-yellow: #facc15;
+  --arena-neon: #39ff14;
+  --arena-purple: #a855f7;
+  --arena-cyan: #22d3ee;
+}
+
+/* ===== BASE STYLES ===== */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 body {
-  background-color: #09090b; 
-  color: #fafafa; 
-  font-family: Arial, sans-serif;
+  background-color: var(--arena-black);
+  color: #fafafa;
+  font-family: 'Inter', system-ui, sans-serif;
+  overflow-x: hidden;
+}
+
+::selection {
+  background-color: var(--arena-yellow);
+  color: #000;
+}
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(250, 204, 21, 0.2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(250, 204, 21, 0.4);
+}
+
+/* ===== UTILITY CLASSES ===== */
+@layer utilities {
+  /* Glassmorphism */
+  .glass {
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .glass-heavy {
+    background: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+
+  /* Neon text glow */
+  .neon-text-yellow {
+    text-shadow: 0 0 10px rgba(250, 204, 21, 0.5),
+                 0 0 20px rgba(250, 204, 21, 0.3),
+                 0 0 40px rgba(250, 204, 21, 0.1);
+  }
+
+  .neon-text-red {
+    text-shadow: 0 0 10px rgba(255, 45, 85, 0.5),
+                 0 0 20px rgba(255, 45, 85, 0.3),
+                 0 0 40px rgba(255, 45, 85, 0.1);
+  }
+
+  .neon-text-cyan {
+    text-shadow: 0 0 10px rgba(34, 211, 238, 0.5),
+                 0 0 20px rgba(34, 211, 238, 0.3),
+                 0 0 40px rgba(34, 211, 238, 0.1);
+  }
+
+  .neon-text-purple {
+    text-shadow: 0 0 10px rgba(168, 85, 247, 0.5),
+                 0 0 20px rgba(168, 85, 247, 0.3),
+                 0 0 40px rgba(168, 85, 247, 0.1);
+  }
+
+  .neon-text-green {
+    text-shadow: 0 0 10px rgba(57, 255, 20, 0.5),
+                 0 0 20px rgba(57, 255, 20, 0.3),
+                 0 0 40px rgba(57, 255, 20, 0.1);
+  }
+
+  /* Neon borders */
+  .neon-border-yellow {
+    box-shadow: 0 0 10px rgba(250, 204, 21, 0.2),
+                inset 0 0 10px rgba(250, 204, 21, 0.05);
+    border-color: rgba(250, 204, 21, 0.5);
+  }
+
+  .neon-border-red {
+    box-shadow: 0 0 10px rgba(255, 45, 85, 0.2),
+                inset 0 0 10px rgba(255, 45, 85, 0.05);
+    border-color: rgba(255, 45, 85, 0.5);
+  }
+
+  .neon-border-cyan {
+    box-shadow: 0 0 10px rgba(34, 211, 238, 0.2),
+                inset 0 0 10px rgba(34, 211, 238, 0.05);
+    border-color: rgba(34, 211, 238, 0.5);
+  }
+
+  /* Damage vignette */
+  .damage-vignette {
+    pointer-events: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: radial-gradient(circle, transparent 40%, rgba(255, 45, 85, 0.4) 100%);
+  }
+
+  /* Screen shake container */
+  .screen-shake-light {
+    animation: shake-light 0.3s ease-in-out;
+  }
+
+  .screen-shake-medium {
+    animation: shake-medium 0.4s ease-in-out;
+  }
+
+  .screen-shake-heavy {
+    animation: shake-heavy 0.6s ease-in-out;
+  }
+
+  /* Glitch effect layers */
+  .glitch-text {
+    position: relative;
+  }
+
+  .glitch-text::before,
+  .glitch-text::after {
+    content: attr(data-text);
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .glitch-text::before {
+    color: var(--arena-cyan);
+    clip-path: polygon(0 0, 100% 0, 100% 33%, 0 33%);
+    transform: translateX(-2px);
+    animation: glitch 2s infinite;
+  }
+
+  .glitch-text::after {
+    color: var(--arena-red);
+    clip-path: polygon(0 66%, 100% 66%, 100% 100%, 0 100%);
+    transform: translateX(2px);
+    animation: glitch 2s infinite reverse;
+  }
+
+  /* Typing dots animation */
+  .typing-dots span {
+    animation: typing-pulse 1.5s ease-in-out infinite;
+  }
+
+  .typing-dots span:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .typing-dots span:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  /* No scrollbar utility */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Grid background pattern */
+  .grid-bg {
+    background-image: 
+      linear-gradient(rgba(250, 204, 21, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(250, 204, 21, 0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  /* Scan line effect */
+  .scanlines::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.03) 2px,
+      rgba(0, 0, 0, 0.03) 4px
+    );
+    pointer-events: none;
+  }
+}
+
+/* ===== COMPONENT CLASSES ===== */
+@layer components {
+  /* Arena button base */
+  .btn-arena {
+    @apply px-6 py-3 font-black uppercase tracking-wider rounded-xl transition-all;
+    @apply border-b-[5px] active:border-b-0 active:translate-y-[5px];
+    @apply disabled:opacity-50 disabled:cursor-not-allowed disabled:active:translate-y-0 disabled:active:border-b-[5px];
+  }
+
+  .btn-fire {
+    @apply btn-arena bg-arena-yellow hover:bg-yellow-300 text-black border-yellow-600;
+  }
+
+  .btn-danger {
+    @apply btn-arena bg-arena-red hover:bg-red-400 text-white border-red-800;
+  }
+
+  .btn-dark {
+    @apply btn-arena bg-zinc-800 hover:bg-zinc-700 text-white border-zinc-950;
+  }
+
+  .btn-neon {
+    @apply btn-arena bg-arena-purple hover:bg-purple-400 text-white border-purple-800;
+  }
+
+  /* Arena input */
+  .input-arena {
+    @apply bg-black/60 border-2 border-white/10 rounded-xl px-5 py-4 text-white font-mono;
+    @apply focus:outline-none focus:border-arena-yellow focus:shadow-neon-yellow transition-all;
+    @apply placeholder:text-white/20;
+  }
+
+  /* Arena card */
+  .card-arena {
+    @apply glass rounded-2xl p-4 md:p-6;
+  }
 }

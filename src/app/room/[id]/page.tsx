@@ -1,365 +1,746 @@
 'use client';
 
-import { use, useEffect, useState, useRef } from 'react';
+import { use, useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
-import YouTube from 'react-youtube';
-import { QRCodeSVG } from 'qrcode.react';
+import { useBattleStore } from '@/stores/battleStore';
+import { useUIStore } from '@/stores/uiStore';
+import { useWebRTC } from '@/hooks/useWebRTC';
+import { useAudioAnalyzer } from '@/hooks/useAudioAnalyzer';
+import { useTypingBroadcast } from '@/hooks/useTypingBroadcast';
+import { useCanvasRecorder } from '@/hooks/useCanvasRecorder';
+import { useSoundEffects } from '@/hooks/useSoundEffects';
+import { reactToRoast, judgeRound, getFinalVerdict } from '@/lib/ai';
 
-interface ChatMessage { sender: string; text: string; audioData?: string; videoId?: string; }
-interface AIVerdict { winner: string; verdict: string; damageScore: string; }
+// UI and layout imports
+import BattleLayout from '@/components/arena/BattleLayout';
+import BattleHeader from '@/components/arena/BattleHeader';
+import { FaceCam } from '@/components/arena/FaceCam';
+import { YouTubePlayer } from '@/components/arena/YouTubePlayer';
+import { RoastInput } from '@/components/arena/RoastInput';
+import { RoastFeed } from '@/components/arena/RoastFeed';
+import { AIJudgePanel } from '@/components/arena/AIJudgePanel';
+import DamageOverlay from '@/components/arena/DamageOverlay';
+import BattleCountdown from '@/components/arena/BattleCountdown';
+import PopupReaction from '@/components/arena/PopupReaction';
+import { VictoryScreen } from '@/components/arena/VictoryScreen';
+import { ClipExporter } from '@/components/export/ClipExporter';
 
 export default function RoomPage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
   const roomCode = resolvedParams.id;
 
-  const [myName, setMyName] = useState<string>('');
-  const [players, setPlayers] = useState<string[]>([]);
-  const [status, setStatus] = useState('WAITING...');
   const [channel, setChannel] = useState<any>(null);
-
   const [videoUrlInput, setVideoUrlInput] = useState('');
-  const [playlist, setPlaylist] = useState<string[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [showExporter, setShowExporter] = useState(false);
 
-  const [scores, setScores] = useState<Record<string, number>>({});
-  
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const chatScrollRef = useRef<HTMLDivElement>(null);
+  // ZUSTAND STORES
+  const {
+    myName,
+    players,
+    playerStates,
+    battlePhase,
+    playlist,
+    currentVideoIndex,
+    isPlaying,
+    roasts,
+    aiJudgments,
+    winner,
+    finalVerdict,
+    mostCookedRoast,
+    setRoom,
+    setPlayers,
+    updatePlayerState,
+    setBattlePhase,
+    setCurrentRound,
+    setPlaylist,
+    setCurrentVideoIndex,
+    setIsPlaying,
+    addRoast,
+    updateRoastScore,
+    addAIJudgment,
+    setAICommentary,
+    setLatestReaction,
+    dealDamage,
+    setWinner,
+    reset: resetBattleStore,
+  } = useBattleStore();
 
-  const playerRef = useRef<any>(null);
-  const isRemoteControl = useRef(false);
+  const {
+    showCountdown,
+    countdownValue,
+    triggerShake,
+    triggerFlash,
+    triggerGlitch,
+    queuePopup,
+    showEmotionalDamage,
+    startCountdown,
+    setCountdownValue,
+    endCountdown,
+    resetUI,
+  } = useUIStore();
 
-  const [isJudging, setIsJudging] = useState(false);
-  const [verdict, setVerdict] = useState<AIVerdict | null>(null);
+  // 1. SOUND EFFECTS SYNTHESIZER INTEGRATION
+  useSoundEffects();
 
-  const [isRecording, setIsRecording] = useState(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<BlobPart[]>([]);
-
-  const [showQR, setShowQR] = useState(false);
-  const [roomUrl, setRoomUrl] = useState('');
-
-  const stateRef = useRef({ messages, playlist, currentIndex, isPlaying, scores });
+  // Setup room channel and generate name
   useEffect(() => {
-    stateRef.current = { messages, playlist, currentIndex, isPlaying, scores };
-  }, [messages, playlist, currentIndex, isPlaying, scores]);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') setRoomUrl(window.location.href);
-    const generatedName = "ROASTER_" + Math.floor(Math.random() * 1000);
-    setMyName(generatedName);
+    const generatedName = 'ROASTER_' + Math.floor(Math.random() * 1000);
+    setRoom(roomCode, generatedName);
 
     const roomChannel = supabase.channel(`room_${roomCode}`);
     setChannel(roomChannel);
 
-    roomChannel
+    return () => {
+      supabase.removeChannel(roomChannel);
+      resetBattleStore();
+      resetUI();
+    };
+  }, [roomCode, setRoom, resetBattleStore, resetUI]);
+
+  // Opponent name
+  const opponentName = players.find((p) => p !== myName) || '';
+
+  // 2. WEBRTC FACE CAM CAMERAS & MIC INTEGRATION
+  const { localStream, remoteStream, isWebRTCConnected } = useWebRTC({
+    channel,
+    myName,
+    players,
+  });
+
+  const { isSpeaking: mySpeaking } = useAudioAnalyzer(localStream);
+  const { isSpeaking: oppSpeaking } = useAudioAnalyzer(remoteStream);
+
+  // 3. TYPING BROADCASTS
+  const { broadcastTyping, opponentTyping } = useTypingBroadcast({
+    channel,
+    myName,
+  });
+
+  // 4. CANVAS RECORDER & CLIP EXPORT
+  const {
+    startRecording,
+    stopRecording,
+    downloadClip,
+    clipBlob,
+    isRecording,
+  } = useCanvasRecorder({
+    localStream,
+    remoteStream,
+    opponentName,
+  });
+
+  const isHost = players.sort()[0] === myName;
+
+  // Realtime Broadcast Listeners
+  useEffect(() => {
+    if (!channel) return;
+
+    const sub = channel
       .on('presence', { event: 'sync' }, () => {
-        const presenceState = roomChannel.presenceState();
+        const presenceState = channel.presenceState();
         const activeUsers: string[] = [];
         for (const id in presenceState) {
           // @ts-ignore
           activeUsers.push(presenceState[id][0].playerName);
         }
         setPlayers(activeUsers);
-        setStatus(`LIVE 🔥 (${activeUsers.length})`);
       })
       .on('broadcast', { event: 'request_sync' }, () => {
-        if (stateRef.current.messages.length > 0 || stateRef.current.playlist.length > 0) {
-          roomChannel.send({ type: 'broadcast', event: 'sync_data', payload: stateRef.current });
+        if (isHost && (playlist.length > 0 || roasts.length > 0)) {
+          channel.send({
+            type: 'broadcast',
+            event: 'sync_data',
+            payload: {
+              playlist,
+              currentVideoIndex,
+              isPlaying,
+              roasts,
+              aiJudgments,
+              battlePhase,
+              winner,
+              finalVerdict,
+              mostCookedRoast,
+              scores: Object.fromEntries(
+                Object.entries(playerStates).map(([k, v]) => [k, v.score])
+              ),
+            },
+          });
         }
       })
-      .on('broadcast', { event: 'sync_data' }, (payload) => {
-        setMessages((prev) => prev.length === 0 ? payload.payload.messages : prev);
-        setPlaylist((prev) => prev.length === 0 ? payload.payload.playlist : prev);
-        setCurrentIndex(payload.payload.currentIndex);
-        setIsPlaying(payload.payload.isPlaying);
-        setScores((prev) => Object.keys(prev).length === 0 ? payload.payload.scores : prev);
-      })
-      .on('broadcast', { event: 'playlist_update' }, (payload) => {
-        setPlaylist(payload.payload.playlist);
-        setCurrentIndex(payload.payload.currentIndex);
-        setIsPlaying(payload.payload.isPlaying);
-        setVerdict(null); 
-      })
-      .on('broadcast', { event: 'video_action' }, (payload) => {
-        if (!playerRef.current) return;
-        const { action, time } = payload.payload;
-        isRemoteControl.current = true;
-        if (action === 'PLAY') { playerRef.current.seekTo(time, true); playerRef.current.playVideo(); } 
-        else if (action === 'PAUSE') { playerRef.current.pauseVideo(); playerRef.current.seekTo(time, true); }
-        setTimeout(() => { isRemoteControl.current = false; }, 500);
-      })
-      .on('broadcast', { event: 'chat_message' }, (payload) => {
-        setMessages((prev) => [...prev, payload.payload]);
-      })
-      .on('broadcast', { event: 'ai_verdict' }, (payload) => {
+      .on('broadcast', { event: 'sync_data' }, (payload: any) => {
         const data = payload.payload;
-        setVerdict(data);
-        
-        // NAYA FIX: Naam ko saaf karke (Trim & Uppercase) match karwana
-        if (data.winner) {
-          const cleanWinner = data.winner.trim().toUpperCase();
-          if (cleanWinner && cleanWinner !== "TIE" && cleanWinner !== "NONE") {
-            setScores(prev => ({ ...prev, [cleanWinner]: (prev[cleanWinner] || 0) + 1 }));
+        if (playlist.length === 0 && data.playlist.length > 0) {
+          setPlaylist(data.playlist);
+        }
+        setCurrentVideoIndex(data.currentVideoIndex);
+        setIsPlaying(data.isPlaying);
+        setBattlePhase(data.battlePhase);
+
+        // Sync player scores
+        if (data.scores) {
+          Object.entries(data.scores).forEach(([name, score]) => {
+            updatePlayerState(name, { score: score as number });
+          });
+        }
+
+        // Sync roasts
+        if (roasts.length === 0 && data.roasts.length > 0) {
+          data.roasts.forEach((r: any) => addRoast(r));
+        }
+      })
+      .on('broadcast', { event: 'playlist_update' }, (payload: any) => {
+        const { playlist: newPlaylist, currentVideoIndex: index, isPlaying: playing } = payload.payload;
+        setPlaylist(newPlaylist);
+        setCurrentVideoIndex(index);
+        setIsPlaying(playing);
+      })
+      .on('broadcast', { event: 'phase_change' }, (payload: any) => {
+        const { phase } = payload.payload;
+        setBattlePhase(phase);
+      })
+      .on('broadcast', { event: 'roast_rated' }, (payload: any) => {
+        const { roastId, score, reaction, damageLevel, damageAmount, sender } = payload.payload;
+        updateRoastScore(roastId, score, reaction, damageLevel);
+        setLatestReaction(reaction);
+        setAICommentary(`${sender.toUpperCase()} gets a rating of ${score}/10! "${reaction}"`);
+
+        // Apply Damage & Visual Effects
+        const target = sender === myName ? opponentName : myName;
+        if (target) {
+          dealDamage(target, damageAmount, damageLevel, roastId);
+
+          // Triggers visual feedback
+          triggerShake(damageLevel === 'critical' || damageLevel === 'heavy' ? 'heavy' : 'medium');
+          triggerFlash('#ff2d55');
+
+          // Popup reactions
+          const emojis: Record<string, string> = {
+            light: '⚡',
+            medium: '🔥',
+            heavy: '💀',
+            critical: '💥',
+          };
+          queuePopup(
+            damageLevel === 'critical' ? 'EMOTIONAL DAMAGE' : `${damageLevel.toUpperCase()} HIT`,
+            emojis[damageLevel] || '🔥',
+            damageLevel === 'critical' ? '#ff2d55' : '#facc15'
+          );
+
+          if (damageLevel === 'critical') {
+            showEmotionalDamage('EMOTIONAL DAMAGE!');
           }
         }
       })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await roomChannel.track({ playerName: generatedName });
-          await roomChannel.send({ type: 'broadcast', event: 'request_sync', payload: {} });
+      .on('broadcast', { event: 'ai_verdict' }, (payload: any) => {
+        const { winner: roundWinner, verdict: roundVerdict, damageScore } = payload.payload;
+
+        // Save round judgment
+        addAIJudgment({
+          roundIndex: currentVideoIndex,
+          winner: roundWinner,
+          verdict: roundVerdict,
+          damageScore,
+          timestamp: Date.now(),
+        });
+
+        // Set judge commentary
+        setAICommentary(`AI JUDGES ROUND: Winner is ${roundWinner}! "${roundVerdict}"`);
+
+        // Deduct massive HP from the round loser
+        const loser = roundWinner === myName ? opponentName : myName;
+        if (loser) {
+          dealDamage(loser, damageScore, 'critical', `judge-${currentVideoIndex}`);
+          updatePlayerState(roundWinner, { score: (playerStates[roundWinner]?.score || 0) + 1 });
+
+          triggerShake('heavy');
+          triggerFlash('#ff2d55');
+          showEmotionalDamage(`${roundWinner.toUpperCase()} ACCEPTS VICTORY!`);
         }
+      })
+      .on('broadcast', { event: 'battle_results' }, (payload: any) => {
+        const { winner: finalWinner, verdict: finalVerdictText, mostCooked } = payload.payload;
+        setWinner(finalWinner, finalVerdictText, mostCooked);
+        setBattlePhase('results');
+        stopRecording();
       });
 
-    return () => { supabase.removeChannel(roomChannel); };
-  }, [roomCode]);
+    return () => {
+      // Unsubscribe not needed as supabase.removeChannel handles it in parent useEffect
+    };
+  }, [
+    channel,
+    isHost,
+    playlist,
+    currentVideoIndex,
+    isPlaying,
+    roasts,
+    aiJudgments,
+    battlePhase,
+    winner,
+    finalVerdict,
+    mostCookedRoast,
+    myName,
+    opponentName,
+    playerStates,
+    addAIJudgment,
+    addRoast,
+    dealDamage,
+    queuePopup,
+    setAICommentary,
+    setBattlePhase,
+    setCurrentVideoIndex,
+    setIsPlaying,
+    setLatestReaction,
+    setPlayers,
+    setPlaylist,
+    setWinner,
+    showEmotionalDamage,
+    stopRecording,
+    triggerFlash,
+    triggerShake,
+    updatePlayerState,
+    updateRoastScore,
+  ]);
 
+  // Synchronize presence tracking once channel is fully ready
   useEffect(() => {
-    if (chatScrollRef.current) chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-  }, [messages]);
-
-  const handleInvite = async () => { 
-    if (navigator.share) {
-      try { await navigator.share({ title: 'Join Roast Arena!', text: `Aaja bhai! Room Code: ${roomCode}`, url: roomUrl }); } 
-      catch (err) { console.error(err); }
-    } else {
-      await navigator.clipboard.writeText(roomUrl);
-      alert("Link copied!");
+    if (channel) {
+      channel.subscribe(async (status: string) => {
+        if (status === 'SUBSCRIBED') {
+          await channel.track({ playerName: myName });
+          await channel.send({ type: 'broadcast', event: 'request_sync', payload: {} });
+        }
+      });
     }
-  };
+  }, [channel, myName]);
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = async () => {
-          const currentVidId = isPlaying ? playlist[currentIndex] : 'lobby';
-          const newMsg: ChatMessage = { sender: myName, text: '🎤 Voice Roast', audioData: reader.result as string, videoId: currentVidId };
-          setMessages((prev) => [...prev, newMsg]);
-          if (channel) await channel.send({ type: 'broadcast', event: 'chat_message', payload: newMsg });
-        };
-      };
-      mediaRecorder.start();
-      setIsRecording(true);
-    } catch (err) { alert("Mic permission allow kar de bhai!"); }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
-    }
-  };
-
+  // --- LOBBY PLAYLIST QUEUE ---
   const handleAddToQueue = async () => {
     if (videoUrlInput.includes('/shorts/')) {
       const id = videoUrlInput.split('/shorts/')[1].split('?')[0];
       const newPlaylist = [...playlist, id];
       setPlaylist(newPlaylist);
-      if (channel) await channel.send({ type: 'broadcast', event: 'playlist_update', payload: { playlist: newPlaylist, currentIndex, isPlaying } });
       setVideoUrlInput('');
-    } else alert("Sirf YouTube Shorts daal!");
-  };
 
-  const handleStartBattle = async () => {
-    setIsPlaying(true);
-    if (channel) await channel.send({ type: 'broadcast', event: 'playlist_update', payload: { playlist, currentIndex, isPlaying: true } });
-  };
-
-  const handleNextVideo = async () => {
-    if (currentIndex < playlist.length - 1) {
-      const nextIndex = currentIndex + 1;
-      setCurrentIndex(nextIndex);
-      setVerdict(null); 
-      if (channel) await channel.send({ type: 'broadcast', event: 'playlist_update', payload: { playlist, currentIndex: nextIndex, isPlaying } });
+      if (channel) {
+        await channel.send({
+          type: 'broadcast',
+          event: 'playlist_update',
+          payload: { playlist: newPlaylist, currentVideoIndex, isPlaying },
+        });
+      }
+    } else {
+      alert('Bhai, sirf YouTube Shorts link paste kar! (e.g. youtube.com/shorts/...)');
     }
   };
 
-  const sendChatMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!chatInput.trim() || !channel) return;
-    
-    const currentVidId = isPlaying ? playlist[currentIndex] : 'lobby';
-    const newMsg: ChatMessage = { sender: myName, text: chatInput, videoId: currentVidId };
-    
-    setMessages((prev) => [...prev, newMsg]);
-    await channel.send({ type: 'broadcast', event: 'chat_message', payload: newMsg });
-    setChatInput('');
+  // --- BATTLE CONTROL: COUNTDOWN OR ROUND START ---
+  const handleStartBattle = async () => {
+    if (playlist.length === 0) return;
+
+    if (channel) {
+      await channel.send({
+        type: 'broadcast',
+        event: 'phase_change',
+        payload: { phase: 'countdown' },
+      });
+    }
+    setBattlePhase('countdown');
   };
 
-  const callAIJudge = async () => {
-    const currentVidId = playlist[currentIndex];
-    const currentVideoChats = messages.filter(m => m.videoId === currentVidId);
+  // Countdown timer lifecycle
+  useEffect(() => {
+    if (battlePhase !== 'countdown') return;
 
-    if (currentVideoChats.length < 2) return alert("Pehle is video par ek doosre ko roast toh karo!");
-    
-    setIsJudging(true);
-    try {
-      const res = await fetch('/api/judge', { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ messages: currentVideoChats, videoId: currentVidId }) 
+    startCountdown(3);
+    const interval = setInterval(() => {
+      useUIStore.setState((state) => {
+        if (state.countdownValue <= 1) {
+          clearInterval(interval);
+          endCountdown();
+
+          if (isHost && channel) {
+            channel.send({
+              type: 'broadcast',
+              event: 'phase_change',
+              payload: { phase: 'battle' },
+            });
+            setIsPlaying(true);
+            channel.send({
+              type: 'broadcast',
+              event: 'playlist_update',
+              payload: { playlist, currentVideoIndex, isPlaying: true },
+            });
+          }
+          setBattlePhase('battle');
+          // Start Canvas Recording automatically
+          startRecording();
+          return { countdownValue: 0 };
+        }
+        return { countdownValue: state.countdownValue - 1 };
       });
-      const data = await res.json();
-      
-      setVerdict(data);
-      
-      // NAYA FIX: Naam ko saaf karke yahan bhi update karna hai
-      if (data.winner) {
-        const cleanWinner = data.winner.trim().toUpperCase();
-        if (cleanWinner && cleanWinner !== "TIE" && cleanWinner !== "NONE") {
-          setScores(prev => ({ ...prev, [cleanWinner]: (prev[cleanWinner] || 0) + 1 }));
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [battlePhase, isHost, channel, playlist, currentVideoIndex, startCountdown, endCountdown, setIsPlaying, startRecording]);
+
+  // --- SUBMIT ROAST WITH AUTOMATIC REALTIME AI EVALUATION ---
+  const handleSendRoast = async (text: string) => {
+    if (!text.trim() || !channel) return;
+
+    const currentVideoId = playlist[currentVideoIndex] || 'lobby';
+    const roastId = `roast-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    const newRoast = {
+      id: roastId,
+      sender: myName,
+      text,
+      videoId: currentVideoId,
+      timestamp: Date.now(),
+    };
+
+    addRoast(newRoast);
+    await channel.send({
+      type: 'broadcast',
+      event: 'chat_message',
+      payload: newRoast,
+    });
+
+    // Reset typing status on submit
+    broadcastTyping(false);
+
+    // Call per-roast AI evaluation (sender calculates to balance API load, then broadcasts)
+    try {
+      const response = await reactToRoast(text, myName, `YouTube Shorts ID: ${currentVideoId}`);
+      const damageAmount =
+        response.score * (response.damageLevel === 'critical' ? 4 : response.damageLevel === 'heavy' ? 3 : 2);
+
+      await channel.send({
+        type: 'broadcast',
+        event: 'roast_rated',
+        payload: {
+          roastId,
+          score: response.score,
+          reaction: response.reaction,
+          damageLevel: response.damageLevel,
+          damageAmount,
+          sender: myName,
+        },
+      });
+
+      // Update locally
+      updateRoastScore(roastId, response.score, response.reaction, response.damageLevel);
+      setLatestReaction(response.reaction);
+      setAICommentary(`YOU get a rating of ${response.score}/10! "${response.reaction}"`);
+
+      const target = opponentName;
+      if (target) {
+        dealDamage(target, damageAmount, response.damageLevel, roastId);
+        triggerShake(response.damageLevel === 'critical' ? 'heavy' : 'medium');
+        triggerFlash('#ff2d55');
+
+        queuePopup(
+          response.damageLevel === 'critical' ? 'EMOTIONAL DAMAGE' : 'GREAT ROAST',
+          response.damageLevel === 'critical' ? '💥' : '🔥',
+          '#ff2d55'
+        );
+
+        // Check if Game Over (HP drops to 0)
+        const currentOppHP = useBattleStore.getState().playerStates[opponentName]?.hp ?? 100;
+        if (currentOppHP <= 0 && isHost) {
+          triggerFinalWinnerEvaluation();
         }
       }
-
-      if (channel) await channel.send({ type: 'broadcast', event: 'ai_verdict', payload: data });
-    } catch (error) { alert("AI so raha hai."); } finally { setIsJudging(false); }
+    } catch (err) {
+      console.error('Error rating roast:', err);
+    }
   };
 
-  const onReady = (event: any) => { playerRef.current = event.target; };
-  const onPlay = async (event: any) => { if (!isRemoteControl.current && channel) await channel.send({ type: 'broadcast', event: 'video_action', payload: { action: 'PLAY', time: event.target.getCurrentTime() } }); };
-  const onPause = async (event: any) => { if (!isRemoteControl.current && channel) await channel.send({ type: 'broadcast', event: 'video_action', payload: { action: 'PAUSE', time: event.target.getCurrentTime() } }); };
+  // --- TRIGGER AI ROUND JUDGMENT OVERLAY ---
+  const callAIJudge = async () => {
+    if (!channel) return;
 
-  const playerOptions = { height: '100%', width: '100%', playerVars: { autoplay: 0, controls: 1 } };
+    setBattlePhase('judging');
+    if (channel) {
+      await channel.send({
+        type: 'broadcast',
+        event: 'phase_change',
+        payload: { phase: 'judging' },
+      });
+    }
+
+    try {
+      const currentVideoId = playlist[currentVideoIndex];
+      const videoChats = roasts.filter((r) => r.videoId === currentVideoId);
+
+      const result = await judgeRound(videoChats, currentVideoId);
+
+      if (channel) {
+        await channel.send({
+          type: 'broadcast',
+          event: 'ai_verdict',
+          payload: result,
+        });
+      }
+
+      // Add locally
+      addAIJudgment({
+        roundIndex: currentVideoIndex,
+        winner: result.winner,
+        verdict: result.verdict,
+        damageScore: result.damageScore,
+        timestamp: Date.now(),
+      });
+
+      setAICommentary(`AI JUDGES ROUND: Winner is ${result.winner}! "${result.verdict}"`);
+
+      const loser = result.winner === myName ? opponentName : myName;
+      if (loser) {
+        dealDamage(loser, result.damageScore, 'critical', `judge-${currentVideoIndex}`);
+        updatePlayerState(result.winner, { score: (playerStates[result.winner]?.score || 0) + 1 });
+        triggerShake('heavy');
+        triggerFlash('#ff2d55');
+        showEmotionalDamage(`${result.winner.toUpperCase()} ACCEPTS VICTORY!`);
+      }
+
+      // Auto-progress after 8 seconds of showing round result
+      setTimeout(() => {
+        handleNextRoundProgress();
+      }, 8000);
+    } catch (err) {
+      console.error('AI Judging failed:', err);
+      setBattlePhase('battle');
+    }
+  };
+
+  // --- PROGRESSION TO NEXT ROUND OR FINAL BATTLE SUMMARY ---
+  const handleNextRoundProgress = async () => {
+    if (currentVideoIndex < playlist.length - 1) {
+      const nextIndex = currentVideoIndex + 1;
+      setCurrentVideoIndex(nextIndex);
+      setCurrentRound(nextIndex);
+
+      if (channel) {
+        await channel.send({
+          type: 'broadcast',
+          event: 'playlist_update',
+          payload: { playlist, currentVideoIndex: nextIndex, isPlaying: true },
+        });
+        await channel.send({
+          type: 'broadcast',
+          event: 'phase_change',
+          payload: { phase: 'countdown' },
+        });
+      }
+      setBattlePhase('countdown');
+    } else {
+      // Playlist fully exhausted! Evaluate epic final victory stats!
+      await triggerFinalWinnerEvaluation();
+    }
+  };
+
+  const triggerFinalWinnerEvaluation = async () => {
+    try {
+      const scoreMap = Object.fromEntries(
+        Object.entries(playerStates).map(([k, v]) => [k, v.score])
+      );
+      const results = await getFinalVerdict(roasts, scoreMap, playlist.length);
+
+      // Find the highest rated roast in the battle
+      const sortedRoasts = [...roasts].sort((a, b) => (b.aiScore || 0) - (a.aiScore || 0));
+      const mostCooked = sortedRoasts[0] || null;
+
+      if (channel) {
+        await channel.send({
+          type: 'broadcast',
+          event: 'battle_results',
+          payload: {
+            winner: results.winner,
+            verdict: results.verdict,
+            mostCooked,
+          },
+        });
+      }
+
+      // Save locally and stop recording
+      setWinner(results.winner, results.verdict, mostCooked);
+      setBattlePhase('results');
+      stopRecording();
+    } catch (err) {
+      console.error('Failed to trigger final results:', err);
+    }
+  };
+
+  const onVideoEnd = () => {
+    if (isHost && battlePhase === 'battle') {
+      callAIJudge();
+    }
+  };
 
   return (
-    <div className="h-[100dvh] w-full flex flex-col bg-[#050505] p-2 md:p-4 overflow-hidden font-sans relative selection:bg-yellow-400 selection:text-black">
-      
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#facc1511_1px,transparent_1px),linear-gradient(to_bottom,#facc1511_1px,transparent_1px)] bg-[size:30px_30px] pointer-events-none z-0"></div>
-      <div className="absolute top-[-20%] left-[-10%] w-[500px] h-[500px] bg-yellow-500/20 rounded-full blur-[150px] pointer-events-none z-0"></div>
-      
-      {showQR && (
-        <div className="absolute inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4 backdrop-blur-xl">
-          <div className="bg-[#0a0a0a] border-4 border-yellow-400 p-8 rounded-3xl shadow-[0_0_80px_rgba(250,204,21,0.5)] flex flex-col items-center">
-            <h2 className="text-yellow-400 font-black text-3xl mb-6 uppercase">SCAN TO JOIN</h2>
-            <div className="bg-white p-4 rounded-xl"><QRCodeSVG value={roomUrl} size={240} level="H" includeMargin={false} /></div>
-            <p className="mt-8 text-yellow-100 font-mono text-2xl font-black bg-yellow-900/40 px-8 py-3 rounded-xl border-2 border-yellow-500/50">{roomCode}</p>
-          </div>
-          <button onClick={() => setShowQR(false)} className="mt-10 px-10 py-4 bg-red-500 text-black font-black uppercase rounded-xl border-2 border-red-800 shadow-[0_6px_0_0_#7f1d1d] active:translate-y-[6px] active:shadow-none transition-all">CLOSE</button>
-        </div>
-      )}
+    <DamageOverlay>
+      {/* 1. Main Grid Esports Layout */}
+      <BattleLayout>
+        {/* Top Header */}
+        <BattleHeader
+          roomCode={roomCode}
+          onShare={async () => {
+            const url = window.location.href;
+            if (navigator.share) {
+              await navigator.share({
+                title: 'Roast Arena Combat Room',
+                text: `Join the arena! Room code: ${roomCode}`,
+                url,
+              });
+            } else {
+              await navigator.clipboard.writeText(url);
+              queuePopup('LINK COPIED', '📋', '#facc15');
+            }
+          }}
+        />
 
-      {verdict && (
-        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-xl">
-          <div className="bg-[#0a0a0a] border-4 border-yellow-400 rounded-[2rem] p-6 max-w-lg w-full text-center shadow-[0_0_100px_rgba(250,204,21,0.4)]">
-            <h2 className="text-4xl font-black text-yellow-400 mb-2 uppercase">🔥 ROUND OVER 🔥</h2>
-            <div className="my-6 py-6 border-y-2 border-yellow-900/50">
-              <p className="text-yellow-600 uppercase text-sm font-black mb-2">Winner (+1 Score)</p>
-              <p className="text-4xl font-black text-white">{verdict.winner}</p>
-            </div>
-            <p className="text-xl text-yellow-100 italic mb-8 font-bold">"{verdict.verdict}"</p>
-            <button onClick={() => { setVerdict(null); handleNextVideo(); }} className="w-full py-5 bg-yellow-400 text-black text-xl font-black uppercase rounded-xl border-2 border-yellow-700 shadow-[0_6px_0_0_#a16207] active:translate-y-[6px] active:shadow-none">PLAY NEXT ROUND</button>
-          </div>
-        </div>
-      )}
-
-      <div className="relative z-10 flex flex-col h-full w-full">
-        {/* HEADER */}
-        <div className="shrink-0 flex justify-between items-center bg-white/[0.03] backdrop-blur-md p-3 md:p-4 mb-3 rounded-2xl border border-white/10 shadow-2xl">
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-black text-white flex items-center gap-3 uppercase drop-shadow-md">
-              ROOM <span className="text-yellow-400 px-4 py-1.5 bg-black/50 rounded-xl border-2 border-yellow-500/30">{roomCode}</span>
-            </h1>
-            <button onClick={() => setShowQR(true)} className="px-4 py-2 bg-zinc-800 text-yellow-400 font-bold rounded-xl border-2 border-zinc-950 shadow-[0_4px_0_0_#09090b] active:translate-y-[4px] active:shadow-none">QR 📱</button>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="hidden md:flex items-center gap-2 bg-black/60 px-4 py-2 rounded-xl border border-white/10">
-              <span className="w-3 h-3 rounded-full bg-yellow-400 animate-pulse"></span>
-              <span className="font-black text-xs text-yellow-400">{status}</span>
-            </div>
-            <button onClick={callAIJudge} disabled={isJudging || !isPlaying} className="px-6 py-2.5 bg-red-500 text-black font-black rounded-xl border-2 border-red-800 shadow-[0_6px_0_0_#7f1d1d] active:translate-y-[6px] active:shadow-none disabled:bg-zinc-800 disabled:shadow-none transition-all">
-              {isJudging ? "JUDGING..." : "JUDGE ⚖️"}
-            </button>
-          </div>
+        {/* 2. Synced Facecams (WebRTC) */}
+        <div className="col-span-12 md:col-span-6 lg:col-span-3 flex flex-col gap-4">
+          <FaceCam
+            stream={localStream}
+            playerName={`${myName} (YOU)`}
+            isLocal={true}
+            hp={playerStates[myName]?.hp ?? 100}
+            isSpeaking={mySpeaking}
+            playerColor="yellow"
+          />
+          {opponentName && (
+            <FaceCam
+              stream={remoteStream}
+              playerName={opponentName}
+              isLocal={false}
+              hp={playerStates[opponentName]?.hp ?? 100}
+              isSpeaking={oppSpeaking}
+              playerColor="cyan"
+            />
+          )}
         </div>
 
-        <div className="flex-1 w-full max-w-7xl mx-auto flex flex-col lg:flex-row gap-3 md:gap-4 overflow-hidden">
-          
-          {/* LEFT: Video Player */}
-          <div className="h-[45%] lg:h-full lg:w-1/2 flex flex-col bg-white/[0.02] backdrop-blur-sm p-3 md:p-4 rounded-3xl border border-white/10 shadow-2xl overflow-hidden relative">
-            {!isPlaying ? (
-              <div className="flex-1 flex flex-col items-center justify-center bg-black/40 rounded-2xl border-2 border-dashed border-yellow-500/30 p-6 text-center overflow-y-auto">
-                <h3 className="text-xl font-black text-yellow-400 mb-6 uppercase">Setup Queue</h3>
-                <div className="flex w-full gap-3 mb-6">
-                  <input type="text" value={videoUrlInput} onChange={(e) => setVideoUrlInput(e.target.value)} placeholder="PASTE SHORT LINK..." className="flex-1 bg-black/60 text-yellow-400 p-4 rounded-xl font-mono focus:border-yellow-400" />
-                  <button onClick={handleAddToQueue} className="px-5 py-3 bg-zinc-800 text-yellow-400 font-black rounded-xl border-2 border-zinc-950 shadow-[0_5px_0_0_#09090b] active:translate-y-[5px] active:shadow-none">ADD ➕</button>
-                </div>
-                {playlist.length > 0 ? (
-                  <button onClick={handleStartBattle} className="mt-auto px-8 py-5 bg-yellow-400 text-black font-black rounded-2xl w-full border-2 border-yellow-700 shadow-[0_6px_0_0_#a16207] active:translate-y-[6px] active:shadow-none">START BATTLE 🔥</button>
-                ) : null}
+        {/* 3. Center Screen Showcase: Sync Shorts Video Player */}
+        <div className="col-span-12 lg:col-span-6 flex flex-col justify-between">
+          {!isPlaying ? (
+            <div className="flex-1 flex flex-col items-center justify-center bg-arena-dark/70 rounded-3xl border border-zinc-800 p-6 text-center max-h-[640px] my-auto">
+              <h2 className="text-arena-yellow font-black text-2xl uppercase mb-6 tracking-wide">
+                ARENA LOBBY STAGING
+              </h2>
+              <div className="flex w-full gap-3 mb-6 max-w-lg">
+                <input
+                  type="text"
+                  value={videoUrlInput}
+                  onChange={(e) => setVideoUrlInput(e.target.value)}
+                  placeholder="PASTE YOUTUBE SHORTS LINK..."
+                  className="flex-1 bg-black/60 border border-zinc-800 text-arena-yellow px-4 py-3.5 rounded-xl font-mono text-sm focus:border-arena-yellow outline-none uppercase"
+                />
+                <button
+                  onClick={handleAddToQueue}
+                  className="px-6 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-arena-yellow rounded-xl font-black text-sm uppercase transition-colors"
+                >
+                  ADD ➕
+                </button>
               </div>
-            ) : (
-              <div className="flex-1 flex flex-col min-h-0">
-                <div className="shrink-0 flex justify-between items-center mb-3 px-2">
-                  <h3 className="text-yellow-400 font-black uppercase bg-black/50 px-4 py-2 rounded-xl border border-yellow-500/20">Round {currentIndex + 1} / {playlist.length}</h3>
-                  {currentIndex < playlist.length - 1 && (
-                    <button onClick={handleNextVideo} className="px-5 py-2 bg-zinc-800 text-yellow-400 font-black rounded-xl border-2 border-zinc-950 shadow-[0_4px_0_0_#09090b] active:translate-y-[4px] active:shadow-none">NEXT ⏭️</button>
-                  )}
-                </div>
-                <div className="flex-1 bg-black rounded-2xl overflow-hidden border-2 border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.8)] flex justify-center items-center">
-                  <YouTube key={playlist[currentIndex]} videoId={playlist[currentIndex]} opts={playerOptions} onReady={onReady} onPlay={onPlay} onPause={onPause} className="absolute inset-0 w-full h-full flex justify-center" iframeClassName="w-full h-full max-w-[450px] object-cover" />
-                </div>
-              </div>
-            )}
-          </div>
 
-          {/* RIGHT: Chat Room */}
-          <div className="h-[55%] lg:h-full lg:w-1/2 flex flex-col bg-white/[0.02] backdrop-blur-sm rounded-3xl border border-white/10 shadow-2xl overflow-hidden relative">
-            <div className="shrink-0 bg-black/40 border-b border-white/10 p-3 text-center flex flex-col px-5 items-center">
-               <div className="flex justify-between w-full items-center mb-2">
-                 <h3 className="font-black text-white uppercase tracking-widest">Roast Chat 💬</h3>
-               </div>
-               <div className="w-full flex gap-2 overflow-x-auto no-scrollbar py-1">
-                 <span className="text-[10px] text-yellow-600 font-black uppercase flex items-center">Scoreboard:</span>
-                 {players.map((p, i) => {
-                   const cleanP = p.trim().toUpperCase(); // NAYA: Score dikhate waqt bhi clean string use karo
-                   return (
-                     <span key={i} className={`px-2 py-1 text-[10px] font-black rounded-md border ${p === myName ? 'bg-yellow-400 text-black border-yellow-600' : 'bg-zinc-800 text-zinc-300 border-zinc-600'} whitespace-nowrap`}>
-                       {p} {p === myName ? '(YOU)' : ''} 🏆 {scores[cleanP] || 0}
-                     </span>
-                   );
-                 })}
-               </div>
-            </div>
-            
-            <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 md:p-6 space-y-5 bg-gradient-to-b from-black/20 to-black/60">
-              {messages.map((msg, idx) => {
-                const isMe = msg.sender === myName;
-                return (
-                  <div key={idx} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                    <span className="text-[10px] text-zinc-400 mb-1.5 px-2 font-bold uppercase bg-black/40 rounded-md py-0.5">{isMe ? 'You' : msg.sender}</span>
-                    <div className={`px-5 py-3 max-w-[85%] font-bold rounded-2xl border-b-4 ${isMe ? 'bg-yellow-400 text-black rounded-br-none border-yellow-600' : 'bg-zinc-800 text-white rounded-bl-none border-zinc-950'}`}>
-                      {msg.text}
-                      {msg.audioData && <audio controls src={msg.audioData} className="mt-3 h-10 w-56 opacity-95 rounded-lg" />}
-                    </div>
+              {/* Playlist counts */}
+              {playlist.length > 0 && (
+                <div className="w-full max-w-lg text-left bg-black/40 border border-zinc-900 rounded-2xl p-4 mb-6">
+                  <h3 className="text-zinc-500 font-bold text-xs uppercase mb-3 tracking-wider">
+                    TIMELINE ROUNDS QUEUE ({playlist.length})
+                  </h3>
+                  <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
+                    {playlist.map((id, index) => (
+                      <div
+                        key={index}
+                        className="text-white font-mono text-xs py-2 px-3 bg-zinc-900/60 rounded-lg flex items-center justify-between border border-zinc-800/40"
+                      >
+                        <span className="text-arena-yellow">ROUND {index + 1}</span>
+                        <span className="text-zinc-500 truncate max-w-[200px]">{id}</span>
+                      </div>
+                    ))}
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              )}
 
-            <form onSubmit={sendChatMessage} className="shrink-0 p-4 bg-black/60 border-t border-white/10 flex gap-3 items-center">
-              <button type="button" onClick={isRecording ? stopRecording : startRecording} className={`p-4 rounded-xl border-2 ${isRecording ? 'bg-red-500 border-red-800 text-black shadow-[0_4px_0_0_#7f1d1d] active:translate-y-[4px] animate-pulse' : 'bg-zinc-800 border-zinc-950 text-yellow-400 shadow-[0_4px_0_0_#09090b] active:translate-y-[4px] active:shadow-none'}`}>
-                {isRecording ? '⏹️' : '🎤'}
-              </button>
-              <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder={isRecording ? "RECORDING..." : "TYPE ROAST..."} disabled={isRecording} className="flex-1 bg-black/80 border-2 border-white/10 rounded-xl px-5 py-4 text-white font-mono focus:border-yellow-400 uppercase" />
-              <button type="submit" disabled={!chatInput.trim() || isRecording} className="bg-yellow-400 text-black px-6 py-4 rounded-xl font-black uppercase border-2 border-yellow-700 shadow-[0_5px_0_0_#a16207] active:translate-y-[5px] active:shadow-none disabled:bg-zinc-800 disabled:shadow-[0_5px_0_0_#09090b] transition-all">
-                SEND
-              </button>
-            </form>
-          </div>
+              {playlist.length > 0 && (
+                <button
+                  onClick={handleStartBattle}
+                  className="px-10 py-4.5 bg-arena-yellow border border-yellow-600 hover:bg-yellow-500 text-black font-black uppercase rounded-2xl text-lg tracking-widest transition-all shadow-[0_0_30px_rgba(250,204,21,0.2)] active:scale-95"
+                >
+                  ENTER THE ARENA 🔥
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col justify-center max-h-[640px] my-auto">
+              <YouTubePlayer
+                videoId={playlist[currentVideoIndex]}
+                onEnd={onVideoEnd}
+              />
+            </div>
+          )}
         </div>
-      </div>
-    </div>
+
+        {/* 4. Side/Bottom panels: Roast Feed + AI Judges */}
+        <div className="col-span-12 md:col-span-6 lg:col-span-3 flex flex-col gap-4 max-h-[640px] overflow-hidden justify-between">
+          <RoastFeed
+            roasts={roasts.filter((r) => r.videoId === playlist[currentVideoIndex])}
+            myName={myName}
+          />
+          <AIJudgePanel
+            verdict={aiJudgments[aiJudgments.length - 1] || null}
+            commentary={useBattleStore((state) => state.aiCommentary)}
+            latestReaction={useBattleStore((state) => state.latestReaction)}
+            isJudging={battlePhase === 'judging'}
+          />
+        </div>
+
+        {/* 5. Roast Chat Input Area (with typing indicators) */}
+        <div className="col-span-12 mt-4 relative">
+          <RoastInput
+            onSubmit={handleSendRoast}
+            onTyping={() => broadcastTyping(true)}
+            disabled={battlePhase !== 'battle'}
+          />
+          {opponentTyping && (
+            <div className="absolute -top-7 left-4">
+              🍳 {opponentName.toUpperCase()} is cooking... 🍳
+            </div>
+          )}
+        </div>
+      </BattleLayout>
+
+      {/* 6. Gameplay Overlays & MODALS */}
+      {/* 3-2-1 Full screen overlay countdown */}
+      {showCountdown && <BattleCountdown />}
+
+      {/* Popup floating text reactions */}
+      <PopupReaction />
+
+      {/* Dramatic Victory results overlay screen */}
+      {battlePhase === 'results' && winner && (
+        <VictoryScreen
+          show={true}
+          winner={winner}
+          loser={winner === myName ? opponentName : myName}
+          finalVerdict={finalVerdict || 'Sheer psychological wreckage.'}
+          winnerScore={playerStates[winner]?.score || 0}
+          loserScore={playerStates[winner === myName ? opponentName : myName]?.score || 0}
+          mostCookedRoast={mostCookedRoast}
+          onDownload={() => setShowExporter(true)}
+          onClose={() => setBattlePhase('lobby')}
+        />
+      )}
+
+      {/* Viral combat clip downloading preview modal */}
+      {showExporter && clipBlob && (
+        <ClipExporter
+          clipBlob={clipBlob}
+          onDownload={downloadClip}
+          onClose={() => setShowExporter(false)}
+        />
+      )}
+    </DamageOverlay>
   );
 }
